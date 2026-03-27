@@ -172,6 +172,7 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        self.activations: dict[int, torch.Tensor] | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -203,6 +204,7 @@ class RequestState:
         if self.stats is not None:
             self.stats.arrival_time = update.arrival_time
         self.is_prefilling = True
+        self.activations = None
 
     @classmethod
     def from_new_request(
@@ -272,9 +274,11 @@ class RequestState:
         pooling_output: torch.Tensor | None,
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
+        activations: dict[int, torch.Tensor] | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
         routed_experts: np.ndarray | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
+        self._update_activations(activations)
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
 
@@ -392,14 +396,17 @@ class RequestState:
 
         # Prepare logprobs, based on delta mode
         logprobs = self.logprobs_processor.logprobs
-        if delta and logprobs:
+        if delta and logprobs and token_ids:
             logprobs = logprobs[-len(token_ids) :]
+        elif delta and not token_ids:
+            logprobs = None
 
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
+            activations=self.activations,
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
@@ -408,6 +415,16 @@ class RequestState:
 
     def _new_pooling_output(self, pooling_output: torch.Tensor) -> PoolingOutput:
         return PoolingOutput(data=pooling_output)
+
+    def _update_activations(
+        self, activations: dict[int, torch.Tensor] | None
+    ) -> None:
+        if activations is None:
+            return
+        if self.activations is None:
+            self.activations = dict(activations)
+        else:
+            self.activations.update(activations)
 
 
 class OutputProcessor:
@@ -615,6 +632,7 @@ class OutputProcessor:
             pooling_output = engine_core_output.pooling_output
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
+            activations = engine_core_output.activations
             kv_transfer_params = engine_core_output.kv_transfer_params
             routed_experts = engine_core_output.routed_experts
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
@@ -641,6 +659,7 @@ class OutputProcessor:
                 pooling_output,
                 finish_reason,
                 stop_reason,
+                activations,
                 kv_transfer_params,
                 routed_experts,
             ):

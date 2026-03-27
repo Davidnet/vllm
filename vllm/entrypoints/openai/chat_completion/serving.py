@@ -53,6 +53,7 @@ from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
     clamp_prompt_logprobs,
+    serialize_activations,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -1081,6 +1082,7 @@ class OpenAIServingChat(OpenAIServing):
                                 if request.return_token_ids
                                 else None
                             ),
+                            activations=serialize_activations(output.activations),
                         )
 
                     # if the model is finished generating
@@ -1181,6 +1183,7 @@ class OpenAIServingChat(OpenAIServing):
                                 if request.return_token_ids
                                 else None
                             ),
+                            activations=serialize_activations(output.activations),
                         )
 
                         finish_reason_sent[i] = True
@@ -1371,6 +1374,7 @@ class OpenAIServingChat(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    activations=serialize_activations(output.activations),
                 )
                 choices.append(choice_data)
                 continue
@@ -1570,6 +1574,7 @@ class OpenAIServingChat(OpenAIServing):
                 token_ids=(
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
+                activations=serialize_activations(output.activations),
             )
             choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 

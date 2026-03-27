@@ -92,6 +92,7 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     # not part of the OpenAI spec but is useful for tracing the tokens
     # in agent scenarios
     token_ids: list[int] | None = None
+    activations: dict[int, Any] | None = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -120,6 +121,7 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     stop_reason: int | str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     token_ids: list[int] | None = None
+    activations: dict[int, Any] | None = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):

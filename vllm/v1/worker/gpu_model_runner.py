@@ -498,7 +498,23 @@ class GPUModelRunner(
         self.encoder_cache: dict[str, torch.Tensor] = {}
         self.late_interaction_runner = LateInteractionRunner()
 
-        self.use_aux_hidden_state_outputs = False
+        self.extract_activation_layers = tuple(self.model_config.extract_activation_layers)
+        self.capture_prompt_activations = bool(self.extract_activation_layers)
+        self.captured_prompt_activations: dict[str, dict[int, torch.Tensor]] = {}
+        self.use_aux_hidden_state_outputs = self.capture_prompt_activations
+        if self.capture_prompt_activations and self.speculative_config is not None:
+            raise NotImplementedError(
+                "extract_activation_layers is not supported together with "
+                "speculative decoding."
+            )
+        if (
+            self.capture_prompt_activations
+            and self.parallel_config.pipeline_parallel_size > 1
+        ):
+            raise NotImplementedError(
+                "extract_activation_layers is not supported with "
+                "pipeline parallelism."
+            )
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
@@ -3119,6 +3135,7 @@ class GPUModelRunner(
         sampler_output: SamplerOutput,
         logits: torch.Tensor | None,
         hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
         num_scheduled_tokens: int,
         spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
@@ -3227,6 +3244,10 @@ class GPUModelRunner(
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
             hidden_states[:num_scheduled_tokens],
+            scheduler_output.num_scheduled_tokens,
+        )
+        self._capture_prompt_activations(
+            aux_hidden_states,
             scheduler_output.num_scheduled_tokens,
         )
 
@@ -3794,7 +3815,9 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
-                # True when EAGLE 3 is used.
+                # Auxiliary hidden states are enabled for speculative decoding
+                # and for prompt activation extraction configured before
+                # torch.compile traces the model.
                 hidden_states, aux_hidden_states = model_output
             else:
                 # Common case.
@@ -4031,6 +4054,7 @@ class GPUModelRunner(
                 sampler_output,
                 logits,
                 hidden_states,
+                aux_hidden_states,
                 scheduler_output.total_num_scheduled_tokens,
                 spec_decode_metadata,
             )
@@ -4061,12 +4085,14 @@ class GPUModelRunner(
                 else:
                     logger.error("RoutedExpertsCapturer not initialized.")
 
+            prompt_activations_dict = self.pop_captured_prompt_activations()
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
                 sampled_token_ids=valid_sampled_token_ids,
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
+                prompt_activations_dict=prompt_activations_dict,
                 kv_connector_output=kv_connector_output,
                 ec_connector_output=ec_connector_output
                 if self.supports_mm_inputs
@@ -4529,7 +4555,20 @@ class GPUModelRunner(
                         )
                         eplb_models += 1
 
-                if self.use_aux_hidden_state_outputs:
+                if self.capture_prompt_activations:
+                    if not supports_eagle3(self.get_model()):
+                        raise RuntimeError(
+                            "Model does not support auxiliary hidden state "
+                            "outputs required by extract_activation_layers"
+                        )
+                    logger.info(
+                        "Capturing prompt activations from layers: %s",
+                        self.extract_activation_layers,
+                    )
+                    self.model.set_aux_hidden_state_layers(
+                        self.extract_activation_layers
+                    )
+                elif self.use_aux_hidden_state_outputs:
                     if not supports_eagle3(self.get_model()):
                         raise RuntimeError(
                             "Model does not support EAGLE3 interface but "
@@ -4841,6 +4880,83 @@ class GPUModelRunner(
             self._sync_device()
 
         return prompt_logprobs_dict
+
+    def clear_captured_prompt_activations(self) -> None:
+        self.captured_prompt_activations.clear()
+        self.input_batch.in_progress_prompt_activations_cpu.clear()
+
+    def pop_captured_prompt_activations(self) -> dict[str, dict[int, torch.Tensor]]:
+        activations = self.captured_prompt_activations
+        self.captured_prompt_activations = {}
+        return activations
+
+    def _capture_prompt_activations(
+        self,
+        aux_hidden_states: list[torch.Tensor] | None,
+        num_scheduled_tokens: dict[str, int],
+    ) -> None:
+        if not self.extract_activation_layers or aux_hidden_states is None:
+            return
+        if len(aux_hidden_states) != len(self.extract_activation_layers):
+            raise RuntimeError(
+                "Mismatch between configured extract_activation_layers and "
+                "returned auxiliary hidden states."
+            )
+
+        in_progress_dict = self.input_batch.in_progress_prompt_activations_cpu
+        completed_prefill_reqs: list[str] = []
+        copied_any = False
+
+        for req_id, num_tokens in num_scheduled_tokens.items():
+            request = self.requests.get(req_id)
+            if request is None:
+                continue
+
+            start_idx = request.num_computed_tokens
+            num_prompt_tokens = request.num_prompt_tokens
+            if start_idx >= num_prompt_tokens:
+                continue
+
+            num_prompt_activations = min(num_tokens, num_prompt_tokens - start_idx)
+            if num_prompt_activations <= 0:
+                continue
+
+            req_idx = self.input_batch.req_id_to_index.get(req_id)
+            if req_idx is None:
+                continue
+            offset = self.query_start_loc.np[req_idx].item()
+            req_layers = in_progress_dict.setdefault(req_id, {})
+            chunk_slice = slice(start_idx, start_idx + num_prompt_activations)
+
+            for layer_idx, layer_hidden_states in zip(
+                self.extract_activation_layers, aux_hidden_states
+            ):
+                layer_buffer = req_layers.get(layer_idx)
+                if layer_buffer is None:
+                    hidden_size = layer_hidden_states.shape[-1]
+                    layer_buffer = torch.empty(
+                        (num_prompt_tokens, hidden_size),
+                        dtype=torch.float32,
+                        device="cpu",
+                        pin_memory=self.pin_memory,
+                    )
+                    req_layers[layer_idx] = layer_buffer
+                layer_buffer[chunk_slice].copy_(
+                    layer_hidden_states[offset : offset + num_prompt_activations],
+                    non_blocking=True,
+                )
+                copied_any = True
+
+            if start_idx + num_prompt_activations >= num_prompt_tokens:
+                completed_prefill_reqs.append(req_id)
+
+        if copied_any:
+            self._sync_device()
+
+        for req_id in completed_prefill_reqs:
+            req_layers = in_progress_dict.pop(req_id, None)
+            if req_layers is not None:
+                self.captured_prompt_activations[req_id] = req_layers
 
     def _get_nans_in_logits(
         self,

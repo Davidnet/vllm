@@ -43,6 +43,7 @@ class CompletionOutput:
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
     routed_experts: np.ndarray | None = None  # [seq_len,layer_num,topk]
+    activations: dict[int, torch.Tensor] | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
     lora_request: LoRARequest | None = None
@@ -56,6 +57,8 @@ class CompletionOutput:
             f"text={self.text!r}, "
             f"token_ids={self.token_ids}, "
             f"routed_experts={self.routed_experts}, "
+            f"activation_layers="
+            f"{sorted(self.activations) if self.activations else None}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
@@ -163,10 +166,17 @@ class RequestOutput:
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
+                        if next_completion.activations is not None:
+                            completion.activations = next_completion.activations
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
                     else:
                         # Replace the output with the new one
+                        if (
+                            next_completion.activations is None
+                            and completion.activations is not None
+                        ):
+                            next_completion.activations = completion.activations
                         self.outputs[i] = next_completion
                     break
             else:

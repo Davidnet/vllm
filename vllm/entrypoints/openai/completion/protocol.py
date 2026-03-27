@@ -468,6 +468,7 @@ class CompletionResponseChoice(OpenAIBaseModel):
     token_ids: list[int] | None = None  # For response
     prompt_logprobs: list[dict[int, Logprob] | None] | None = None
     prompt_token_ids: list[int] | None = None  # For prompt
+    activations: dict[int, Any] | None = None
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -503,6 +504,7 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
     # prompt tokens is put into choice to align with CompletionResponseChoice
     prompt_token_ids: list[int] | None = None
     token_ids: list[int] | None = None
+    activations: dict[int, Any] | None = None
 
 
 class CompletionStreamResponse(OpenAIBaseModel):

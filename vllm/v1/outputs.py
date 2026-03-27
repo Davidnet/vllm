@@ -113,6 +113,7 @@ class LogprobsTensors(NamedTuple):
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
 PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
+PromptActivations: TypeAlias = dict[int, torch.Tensor]
 
 
 @dataclass
@@ -237,6 +238,10 @@ class ModelRunnerOutput:
     # [prompt_len, num_prompt_logprobs]
     # [prompt_len]
     prompt_logprobs_dict: dict[str, LogprobsTensors | None] = field(
+        default_factory=dict
+    )
+    # req_id -> layer_idx -> [prompt_len, hidden_size]
+    prompt_activations_dict: dict[str, PromptActivations] = field(
         default_factory=dict
     )
 

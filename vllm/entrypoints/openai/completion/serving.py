@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
     clamp_prompt_logprobs,
+    serialize_activations,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
@@ -400,6 +401,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                     if request.return_token_ids
                                     else None
                                 ),
+                                activations=serialize_activations(output.activations),
                             )
                         ],
                     )
@@ -533,6 +535,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
+                    activations=serialize_activations(output.activations),
                 )
                 choices.append(choice_data)
 

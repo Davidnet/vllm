@@ -200,6 +200,12 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    extract_activation_layers: tuple[int, ...] = ()
+    """Layer indices whose prompt activations should be captured and returned.
+
+    These layers are configured before `torch.compile` so the compiled graph
+    is traced with the requested activation captures already in place.
+    """
     max_logprobs: int = 20
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
@@ -666,6 +672,22 @@ class ModelConfig:
     def validate_quantization_before(cls, value: Any) -> Any:
         if isinstance(value, str):
             return value.lower()
+        return value
+
+    @field_validator("extract_activation_layers", mode="before")
+    @classmethod
+    def validate_extract_activation_layers_before(cls, value: Any) -> Any:
+        if value is None:
+            return ()
+        if isinstance(value, int):
+            value = (value,)
+        if isinstance(value, (list, tuple)):
+            layers = tuple(int(layer) for layer in value)
+            if any(layer < 0 for layer in layers):
+                raise ValueError(
+                    "extract_activation_layers must only contain non-negative integers."
+                )
+            return layers
         return value
 
     @model_validator(mode="after")

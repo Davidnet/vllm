@@ -1218,3 +1218,21 @@ def clamp_prompt_logprobs(
             if logprob_values.logprob == float("-inf"):
                 logprob_values.logprob = -9999.0
     return prompt_logprobs
+
+
+def serialize_activations(
+    activations: Mapping[int, Any] | None,
+) -> dict[int, Any] | None:
+    if not activations:
+        return None
+
+    serialized: dict[int, Any] = {}
+    for layer_idx, activation in activations.items():
+        if hasattr(activation, "detach"):
+            activation = activation.detach()
+        if hasattr(activation, "cpu"):
+            activation = activation.cpu()
+        serialized[layer_idx] = (
+            activation.tolist() if hasattr(activation, "tolist") else activation
+        )
+    return serialized
