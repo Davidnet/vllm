@@ -8,12 +8,14 @@ from functools import partial
 from importlib.metadata import version
 from typing import TYPE_CHECKING, Any
 
+import pybase64 as base64
 import torch
 from packaging.version import Version
 from safetensors.torch import load_file, save_file
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KV_DEFER_OUTPUT_KEY,
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
@@ -62,6 +64,24 @@ def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
     return data
 
 
+def decode_base64_tensor(obj: dict[str, Any]) -> torch.Tensor:
+    """Decode a tensor that was base64-encoded at the HTTP serving boundary.
+
+    Inverse of the encoding applied to tensors in
+    ``CompletionResponse.kv_transfer_params`` when ``return_inline`` is used
+    over the OpenAI API.
+
+    Args:
+        obj: Dict with "dtype", "shape" and base64 "data" keys.
+
+    Returns:
+        The decoded CPU tensor.
+    """
+    data = bytearray(base64.b64decode(obj["data"]))
+    dtype = getattr(torch, obj["dtype"])
+    return torch.frombuffer(data, dtype=dtype).reshape(obj["shape"])
+
+
 def cleanup_hidden_states(path: str, keep_hidden_states: bool = False) -> None:
     """Clean up hidden states file and lock file after loading.
 
@@ -81,6 +101,9 @@ class PendingSave:
     filename: str
     token_ids: torch.Tensor
     block_ids: list[int]
+    # Return the extracted tensors inline with the request output
+    # instead of writing them to disk.
+    return_inline: bool = False
 
 
 @dataclass
@@ -97,6 +120,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     Simple debug implementation of a HiddenStatesConnector.
 
     Simply extracts the hidden states from the kv cache and stores them to disk.
+    With ``"return_inline": True`` in a request's kv_transfer_params, the
+    tensors are instead returned with the request output: as torch.Tensors in
+    ``RequestOutput.kv_transfer_params`` offline, base64-encoded over HTTP.
     Must be used in conjunction with the `extract_hidden_states` spec decoding method.
     """
 
@@ -243,6 +269,11 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         # req_ids reported as finished-generating by the scheduler,
         # accumulated across get_finished calls.
         self._accumulated_finished_req_ids: set[str] = set()
+        # Inline-return state: req_id → extracted tensors awaiting DtoH-copy
+        # completion, then moved to _ready_payloads for pickup by
+        # take_finished_sending_payloads.
+        self._inline_payloads: dict[str, dict[str, torch.Tensor]] = {}
+        self._ready_payloads: dict[str, dict[str, torch.Tensor]] = {}
 
     def _get_copy_stream(self) -> torch.cuda.Stream:
         """Lazily create the copy stream (CUDA must be initialized)."""
@@ -408,6 +439,14 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             "token_ids": pending.token_ids.clone(),
         }
 
+        if pending.return_inline:
+            # Inline return: no disk write or lock. get_finished reports the
+            # request once copy_done completes and moves the tensors to
+            # _ready_payloads for take_finished_sending_payloads.
+            self._inline_payloads[pending.req_id] = tensors
+            self._req_copy_events[pending.req_id] = copy_done
+            return
+
         # Submit to thread pool for disk write.
         prior = self._req_futures.get(pending.req_id)
         assert prior is None, "Found another KV transfer request with same req_id!"
@@ -503,7 +542,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 custom_path = None
             filename = custom_path or default_path
             self._request_filenames[new_req.req_id] = filename
-            meta.new_req_filenames[new_req.req_id] = filename
+            # Inline-return requests write no file, so no lock is needed.
+            if not kv_params.get("return_inline", False):
+                meta.new_req_filenames[new_req.req_id] = filename
 
         return meta
 
@@ -518,10 +559,15 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         Returns True to delay block freeing until get_finished extracts
         the hidden states from the KV cache.
+
+        With ``return_inline`` in the request's kv_transfer_params, no file
+        is written; the extracted tensors are returned with the request's
+        final output instead (held back via KV_DEFER_OUTPUT_KEY).
         """
         req_id = request.request_id
         filename = self._request_filenames.pop(req_id)
         kv_params = request.kv_transfer_params or {}
+        return_inline = kv_params.get("return_inline", False)
         if kv_params.get("include_output_tokens", False):
             # Exclude the final token — it was the model's output, never an
             # input to a forward pass, so its hidden state is not in the cache.
@@ -540,7 +586,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
             filename=filename,
             token_ids=token_ids,
             block_ids=list(block_ids),
+            return_inline=return_inline,
         )
+        if return_inline:
+            return True, {"hidden_states_inline": True, KV_DEFER_OUTPUT_KEY: True}
         return True, {"hidden_states_path": filename}
 
     def get_finished(
@@ -573,6 +622,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                 self._req_copy_events.pop(req_id, None)
                 done_sending.add(req_id)
                 self._accumulated_finished_req_ids.discard(req_id)
+                # The DtoH copy is complete, so inline tensors are valid now.
+                payload = self._inline_payloads.pop(req_id, None)
+                if payload is not None:
+                    self._ready_payloads[req_id] = payload
                 # Clean up any leftover lock fds (e.g. aborted requests
                 # that never went through _submit_async_write).
                 lock_fd = self._lock_fds.pop(req_id, None)
@@ -580,6 +633,16 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
                     os.close(lock_fd)
 
         return done_sending or None, None
+
+    def take_finished_sending_payloads(
+        self,
+    ) -> dict[str, dict[str, torch.Tensor]] | None:
+        """Hand inline-return tensors to the scheduler with done_sending."""
+        if not self._ready_payloads:
+            return None
+        payloads = self._ready_payloads
+        self._ready_payloads = {}
+        return payloads
 
     def request_finished_all_groups(
         self,

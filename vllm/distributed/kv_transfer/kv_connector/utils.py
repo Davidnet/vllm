@@ -86,6 +86,7 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
+        finished_sending_payloads: dict[str, dict[str, torch.Tensor]] = {}
         aggregated_kv_connector_stats = None
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
@@ -114,6 +115,9 @@ class KVOutputAggregator:
             update_finished_set(
                 kv_output.finished_recving, self._recv_remaining_count, finished_recving
             )
+
+            if kv_output.finished_sending_payloads:
+                finished_sending_payloads.update(kv_output.finished_sending_payloads)
 
             # Aggregate kv_connector_stats from all workers.
             if aggregated_kv_connector_stats is None:
@@ -160,6 +164,7 @@ class KVOutputAggregator:
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
+            finished_sending_payloads=finished_sending_payloads or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
             kv_cache_events=combined_kv_cache_events or None,
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,

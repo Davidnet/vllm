@@ -43,10 +43,15 @@ with tempfile.TemporaryDirectory() as tmpdirname:
         ),
     )
 
-    prompts = ["Generate a sentence with hidden states", "Write a python function"]
+    prompts = [
+        "Generate a sentence with hidden states",
+        "Write a python function",
+        "Explain the transformer architecture",
+    ]
 
-    # One request uses defaults, the other uses a custom save path and
-    # includes output token hidden states via per-request kv_transfer_params.
+    # One request uses defaults, one uses a custom save path and includes
+    # output token hidden states, and one skips disk entirely and returns
+    # the tensors inline in RequestOutput.kv_transfer_params.
     sampling_params_list = [
         SamplingParams(max_tokens=1),
         SamplingParams(
@@ -60,6 +65,10 @@ with tempfile.TemporaryDirectory() as tmpdirname:
                 }
             },
         ),
+        SamplingParams(
+            max_tokens=5,
+            extra_args={"kv_transfer_params": {"return_inline": True}},
+        ),
     ]
     outputs = llm.generate(prompts, sampling_params_list)
 
@@ -67,13 +76,19 @@ with tempfile.TemporaryDirectory() as tmpdirname:
         print("\nPrompt:", output.prompt)
         print("Prompt token ids:", output.prompt_token_ids)
 
-        hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
-        assert hidden_states_path is not None
-        print("Hidden states path:", hidden_states_path)
+        if output.kv_transfer_params.get("hidden_states_inline"):
+            # Inline return: real torch.Tensors, nothing written to disk.
+            token_ids = output.kv_transfer_params["token_ids"]
+            hidden_states = output.kv_transfer_params["hidden_states"]
+            print("Hidden states returned inline")
+        else:
+            hidden_states_path = output.kv_transfer_params.get("hidden_states_path")
+            assert hidden_states_path is not None
+            print("Hidden states path:", hidden_states_path)
 
-        obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
-        token_ids = obj["token_ids"]
-        hidden_states = obj["hidden_states"]
+            obj = example_hidden_states_connector.load_hidden_states(hidden_states_path)
+            token_ids = obj["token_ids"]
+            hidden_states = obj["hidden_states"]
 
         print("Extracted token ids:", token_ids)
         print(
@@ -81,4 +96,5 @@ with tempfile.TemporaryDirectory() as tmpdirname:
         )  # [num_tokens, num_extracted_layers, hidden_size]
         print("Extracted hidden states:", hidden_states)
 
-        example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)
+        if not output.kv_transfer_params.get("hidden_states_inline"):
+            example_hidden_states_connector.cleanup_hidden_states(hidden_states_path)

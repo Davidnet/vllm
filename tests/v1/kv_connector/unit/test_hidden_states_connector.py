@@ -124,3 +124,35 @@ def test_find_group_id_errors_clearly_when_absorbed_by_mla_swa_verifier():
     cfg = SimpleNamespace(kv_cache_groups=groups)
     with pytest.raises(ValueError, match="MLA verifiers are unsupported"):
         ExampleHiddenStatesConnector._find_cache_kv_group_id(cfg)
+
+
+# ---- inline return ----------------------------------------------------------
+
+
+def test_take_finished_sending_payloads_drains_ready():
+    payload = {"hidden_states": torch.zeros(2, 3), "token_ids": torch.arange(2)}
+    conn = SimpleNamespace(_ready_payloads={"req-1": payload})
+    taken = ExampleHiddenStatesConnector.take_finished_sending_payloads(conn)
+    assert taken == {"req-1": payload}
+    # Drained: a second call reports nothing.
+    assert ExampleHiddenStatesConnector.take_finished_sending_payloads(conn) is None
+
+
+def test_base64_tensor_roundtrip_at_serving_boundary():
+    # The HTTP serving layer encodes tensors in kv_transfer_params;
+    # decode_base64_tensor is the client-side inverse.
+    from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (  # noqa: E501
+        decode_base64_tensor,
+    )
+    from vllm.entrypoints.openai.completion.serving import (
+        _encode_kv_transfer_tensors,
+    )
+
+    hidden_states = torch.randn(5, 4, 8, dtype=torch.bfloat16)
+    params = {"hidden_states_inline": True, "hidden_states": hidden_states}
+    encoded = _encode_kv_transfer_tensors(params)
+
+    assert encoded["hidden_states_inline"] is True
+    decoded = decode_base64_tensor(encoded["hidden_states"])
+    assert decoded.dtype == torch.bfloat16
+    assert torch.equal(decoded, hidden_states)

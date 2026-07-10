@@ -69,6 +69,7 @@ Both offline and online modes support per-request options via `kv_transfer_param
 | --- | --- | --- |
 | `hidden_states_path` | Auto-generated | Custom file path for saving hidden states. If not set, files are saved to `<shared_storage_path>/<request_id>.safetensors`. Requires `allow_custom_save_path` to be enabled in the server config. |
 | `include_output_tokens` | `False` | When `True`, save hidden states for both prompt and generated output tokens. When `False`, only prompt token hidden states are saved. |
+| `return_inline` | `False` | When `True`, skip the disk write and return the extracted tensors with the request output instead. See [Inline Return](#inline-return). |
 
 ### Offline usage
 
@@ -102,6 +103,47 @@ Pass `kv_transfer_params` as a top-level field in the API request:
 }
 ```
 
+## Inline Return
+
+With `"return_inline": True` in a request's `kv_transfer_params`, no file is written; the request's final output is held until extraction completes and the tensors are returned with it. This avoids shared storage entirely, at the cost of carrying the full payload (`num_tokens × num_extracted_layers × hidden_size` elements) through the response path.
+
+Offline, `output.kv_transfer_params` contains real `torch.Tensor`s:
+
+```python
+outputs = llm.generate(
+    ["The future of AI is"],
+    SamplingParams(
+        max_tokens=1,
+        extra_args={"kv_transfer_params": {"return_inline": True}},
+    ),
+)
+hidden_states = outputs[0].kv_transfer_params["hidden_states"]
+token_ids = outputs[0].kv_transfer_params["token_ids"]
+```
+
+Online, the tensors are base64-encoded in the JSON response as `{"dtype", "shape", "data"}` dicts. Decode them with `decode_base64_tensor()` from the connector module:
+
+```python
+import requests
+
+from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (
+    decode_base64_tensor,
+)
+
+response = requests.post(
+    "http://localhost:8000/v1/completions",
+    json={
+        "model": "Qwen/Qwen3-8B",
+        "prompt": "The future of AI is",
+        "max_tokens": 1,
+        "kv_transfer_params": {"return_inline": True},
+    },
+).json()
+params = response["kv_transfer_params"]
+hidden_states = decode_base64_tensor(params["hidden_states"])
+token_ids = decode_base64_tensor(params["token_ids"])
+```
+
 ## Configuration
 
 The `kv_connector_extra_config` dict accepts these server-level options:
@@ -121,6 +163,8 @@ Each request produces a `.safetensors` file containing:
 - **`token_ids`** — shape `[num_tokens]`
 
 The file path is returned in `output.kv_transfer_params["hidden_states_path"]`. Use `load_hidden_states()` from the connector module to read the file with proper synchronization.
+
+With [inline return](#inline-return), the same two tensors are returned under the `hidden_states` and `token_ids` keys of `kv_transfer_params` instead, alongside `"hidden_states_inline": True`.
 
 !!! note
     Chunked prefill is not compatible with this feature and must be disabled.

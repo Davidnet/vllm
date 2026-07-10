@@ -335,6 +335,17 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
         return finished_sending or None, finished_recving or None
 
+    def take_finished_sending_payloads(
+        self,
+    ) -> dict[str, dict[str, torch.Tensor]] | None:
+        payloads: dict[str, dict[str, torch.Tensor]] = {}
+        for c in self._connectors:
+            connector_payloads = c.take_finished_sending_payloads()
+            if connector_payloads:
+                for req_id, tensors in connector_payloads.items():
+                    payloads.setdefault(req_id, {}).update(tensors)
+        return payloads or None
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()
         for c in self._connectors:

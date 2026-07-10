@@ -197,6 +197,10 @@ class KVConnectorOutput:
     # [req_ids]
     finished_sending: set[str] | None = None
     finished_recving: set[str] | None = None
+    # req_id -> named CPU tensors to return inline with the request's final
+    # output (e.g. extracted hidden states). Reported no later than the step
+    # in which the request appears in finished_sending.
+    finished_sending_payloads: dict[str, dict[str, torch.Tensor]] | None = None
     kv_connector_stats: KVConnectorStats | None = None
     kv_cache_events: KVConnectorKVEvents | None = None
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None
@@ -214,6 +218,7 @@ class KVConnectorOutput:
         return (
             not self.finished_sending
             and not self.finished_recving
+            and not self.finished_sending_payloads
             and not self.kv_connector_stats
             and not self.kv_cache_events
             and not self.invalid_block_ids

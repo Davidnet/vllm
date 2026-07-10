@@ -219,6 +219,39 @@ def test_tensor_serialization():
     )
 
 
+def test_engine_core_output_kv_transfer_tensors():
+    """kv_transfer_tensors must decode back to real torch.Tensors across the
+    engine-core -> frontend boundary (used for inline KV connector payloads,
+    e.g. extracted hidden states)."""
+    from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+
+    encoder = MsgpackEncoder()
+    decoder = MsgpackDecoder(EngineCoreOutputs)
+
+    hidden_states = torch.randn(5, 4, 8, dtype=torch.bfloat16)
+    token_ids = torch.arange(5)
+    outputs = EngineCoreOutputs(
+        outputs=[
+            EngineCoreOutput(
+                request_id="req-1",
+                new_token_ids=[7],
+                kv_transfer_params={"hidden_states_inline": True},
+                kv_transfer_tensors={
+                    "hidden_states": hidden_states,
+                    "token_ids": token_ids,
+                },
+            )
+        ]
+    )
+
+    decoded = decoder.decode(encoder.encode(outputs)).outputs[0]
+
+    assert decoded.kv_transfer_params == {"hidden_states_inline": True}
+    assert isinstance(decoded.kv_transfer_tensors["hidden_states"], torch.Tensor)
+    assert torch.equal(decoded.kv_transfer_tensors["hidden_states"], hidden_states)
+    assert torch.equal(decoded.kv_transfer_tensors["token_ids"], token_ids)
+
+
 def test_numpy_array_serialization():
     """Test encoding and decoding of a numpy array."""
     encoder = MsgpackEncoder()

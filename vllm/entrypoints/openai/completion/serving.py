@@ -6,10 +6,11 @@ import io
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pybase64 as base64
+import torch
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -48,8 +49,32 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
+from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
+
+
+def _encode_kv_transfer_tensors(
+    kv_transfer_params: dict[str, Any],
+) -> dict[str, Any]:
+    """Make kv_transfer_params JSON-safe by base64-encoding tensor values.
+
+    Connectors can return tensors inline (e.g. extracted hidden states),
+    which surface here as raw torch.Tensors. Each is replaced with a
+    ``{"dtype", "shape", "data"}`` dict holding its raw bytes base64-encoded
+    (``np.save`` can't represent dtypes like bfloat16). Clients can decode
+    with ``example_hidden_states_connector.decode_base64_tensor``.
+    """
+    return {
+        key: {
+            "dtype": str(value.dtype).removeprefix("torch."),
+            "shape": list(value.shape),
+            "data": base64.b64encode(tensor_data(value)).decode("ascii"),
+        }
+        if isinstance(value, torch.Tensor)
+        else value
+        for key, value in kv_transfer_params.items()
+    }
 
 
 class OpenAIServingCompletion(GenerateBaseServing):
@@ -632,6 +657,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
+            if kv_transfer_params:
+                kv_transfer_params = _encode_kv_transfer_tensors(kv_transfer_params)
         return CompletionResponse(
             id=request_id,
             created=created_time,

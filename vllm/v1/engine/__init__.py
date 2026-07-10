@@ -190,6 +190,10 @@ class EngineCoreOutput(
     stop_reason: int | str | None = None
     events: list[EngineCoreEvent] | None = None
     kv_transfer_params: dict[str, Any] | None = None
+    # Named tensors from the KV connector, kept in a typed field (instead of
+    # inside kv_transfer_params) so msgpack decoding reconstructs them. The
+    # frontend merges them into RequestOutput.kv_transfer_params.
+    kv_transfer_tensors: dict[str, torch.Tensor] | None = None
 
     trace_headers: Mapping[str, str] | None = None
 
