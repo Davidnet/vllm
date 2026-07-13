@@ -230,12 +230,18 @@ def test_engine_core_output_kv_transfer_tensors():
 
     hidden_states = torch.randn(5, 4, 8, dtype=torch.bfloat16)
     token_ids = torch.arange(5)
+    # Set fields that are positionally *after* kv_transfer_tensors in the
+    # array_like struct. kv_transfer_tensors is kept last precisely so these
+    # stay aligned with the Rust engine-core client; if it were reinserted
+    # mid-struct these would decode into the wrong slots.
     outputs = EngineCoreOutputs(
         outputs=[
             EngineCoreOutput(
                 request_id="req-1",
                 new_token_ids=[7],
                 kv_transfer_params={"hidden_states_inline": True},
+                trace_headers={"traceparent": "abc"},
+                num_nans_in_logits=3,
                 kv_transfer_tensors={
                     "hidden_states": hidden_states,
                     "token_ids": token_ids,
@@ -247,6 +253,8 @@ def test_engine_core_output_kv_transfer_tensors():
     decoded = decoder.decode(encoder.encode(outputs)).outputs[0]
 
     assert decoded.kv_transfer_params == {"hidden_states_inline": True}
+    assert decoded.trace_headers == {"traceparent": "abc"}
+    assert decoded.num_nans_in_logits == 3
     assert isinstance(decoded.kv_transfer_tensors["hidden_states"], torch.Tensor)
     assert torch.equal(decoded.kv_transfer_tensors["hidden_states"], hidden_states)
     assert torch.equal(decoded.kv_transfer_tensors["token_ids"], token_ids)

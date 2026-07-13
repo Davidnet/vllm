@@ -31,6 +31,23 @@ EngineId = str
 BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
+def merge_finished_sending_payloads(
+    dest: dict[str, dict[str, torch.Tensor]],
+    src: dict[str, dict[str, torch.Tensor]],
+) -> None:
+    """Merge inline connector payloads into ``dest`` in place.
+
+    Payloads arrive as ``{req_id: {name: tensor}}`` and can be reported
+    piecemeal across steps, TP ranks, and independently-completing
+    sub-connectors. A shallow ``dest.update(src)`` would replace a request's
+    whole tensor dict, dropping earlier names; merge the inner dicts instead.
+    On a duplicate ``(req_id, name)`` the incoming tensor wins (ranks report
+    identical data), matching MultiConnector's aggregation.
+    """
+    for req_id, tensors in src.items():
+        dest.setdefault(req_id, {}).update(tensors)
+
+
 def get_kv_connector_cache_layout():
     # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
     # used for faster transfer.
@@ -117,7 +134,9 @@ class KVOutputAggregator:
             )
 
             if kv_output.finished_sending_payloads:
-                finished_sending_payloads.update(kv_output.finished_sending_payloads)
+                merge_finished_sending_payloads(
+                    finished_sending_payloads, kv_output.finished_sending_payloads
+                )
 
             # Aggregate kv_connector_stats from all workers.
             if aggregated_kv_connector_stats is None:

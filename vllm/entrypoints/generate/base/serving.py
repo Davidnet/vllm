@@ -5,8 +5,10 @@ import time
 from collections.abc import Awaitable, Mapping
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar
 
+import pybase64 as base64
+import torch
 from fastapi import Request
 from pydantic import ConfigDict
 from starlette.datastructures import Headers
@@ -36,6 +38,7 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
 
@@ -315,3 +318,58 @@ def clamp_prompt_logprobs(
             if logprob_values.logprob == float("-inf"):
                 logprob_values.logprob = -9999.0
     return prompt_logprobs
+
+
+def encode_kv_transfer_tensors(
+    kv_transfer_params: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Make kv_transfer_params JSON-safe by base64-encoding tensor values.
+
+    Connectors can return tensors inline (e.g. extracted hidden states),
+    which surface in RequestOutput.kv_transfer_params as raw torch.Tensors.
+    Each is replaced with a ``{"dtype", "shape", "data"}`` dict holding its raw
+    bytes base64-encoded (``np.save`` can't represent dtypes like bfloat16).
+    Clients decode with ``example_hidden_states_connector.decode_base64_tensor``.
+
+    Shared across the completions, chat, and responses serving boundaries so
+    every endpoint that accepts kv_transfer_params encodes tensors uniformly
+    instead of leaking raw torch.Tensors into JSON serialization.
+    """
+    if not kv_transfer_params:
+        return kv_transfer_params
+    return {
+        key: {
+            "dtype": str(value.dtype).removeprefix("torch."),
+            "shape": list(value.shape),
+            "data": base64.b64encode(tensor_data(value)).decode("ascii"),
+        }
+        if isinstance(value, torch.Tensor)
+        else value
+        for key, value in kv_transfer_params.items()
+    }
+
+
+def validate_inline_kv_transfer(
+    kv_transfer_params: dict[str, Any] | None,
+    *,
+    stream: bool | None = False,
+    num_prompts: int = 1,
+) -> None:
+    """Reject unsupported combinations of connector inline return.
+
+    Inline return (``"return_inline": true`` in kv_transfer_params) holds the
+    request's final output until the connector reports the payload, then
+    surfaces the tensors on the single response object. That contract is
+    incompatible with streaming (no place to put the deferred payload without
+    silently dropping it) and with batched prompts (a single response has one
+    kv_transfer_params slot). Reject both up front rather than lose data.
+
+    Raises:
+        ValueError: if return_inline is combined with streaming or >1 prompt.
+    """
+    if not kv_transfer_params or not kv_transfer_params.get("return_inline"):
+        return
+    if stream:
+        raise ValueError("return_inline is not supported with stream=true")
+    if num_prompts > 1:
+        raise ValueError("return_inline requires a single prompt")

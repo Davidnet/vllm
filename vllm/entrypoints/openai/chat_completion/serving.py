@@ -24,7 +24,9 @@ from vllm.entrypoints.generate.base.serving import (
     GenerationError,
     build_per_request_timing_metrics,
     clamp_prompt_logprobs,
+    encode_kv_transfer_tensors,
     format_token_id_placeholder,
+    validate_inline_kv_transfer,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -268,6 +270,13 @@ class OpenAIServingChat(GenerateBaseServing):
             return result
 
         conversation, engine_inputs = result
+
+        try:
+            validate_inline_kv_transfer(
+                request.kv_transfer_params, stream=request.stream
+            )
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
@@ -1052,7 +1061,7 @@ class OpenAIServingChat(GenerateBaseServing):
                 final_res.prompt_token_ids if request.return_token_ids else None
             ),
             prompt_text=prompt_text,
-            kv_transfer_params=final_res.kv_transfer_params,
+            kv_transfer_params=encode_kv_transfer_tensors(final_res.kv_transfer_params),
             metrics=per_request_metrics,
         )
 

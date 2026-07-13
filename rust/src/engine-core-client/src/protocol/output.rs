@@ -107,6 +107,13 @@ pub struct EngineCoreOutput {
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
+    /// Named CPU tensors returned inline by a KV connector (e.g. extracted
+    /// hidden states). Kept as an opaque trailing field: the Rust frontend
+    /// does not decode the out-of-band tensor frames, so inline payloads are
+    /// not forwarded through this client. Present only to preserve positional
+    /// wire compatibility with the Python `EngineCoreOutput` struct.
+    #[serde(default)]
+    pub kv_transfer_tensors: Option<OpaqueValue>,
 }
 
 impl EngineCoreOutput {
@@ -378,6 +385,7 @@ mod tests {
                 prefill_stats: None,
                 routed_experts: None,
                 num_nans_in_logits: 0,
+                kv_transfer_tensors: None,
             }],
             finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
             ..Default::default()
@@ -430,6 +438,7 @@ mod tests {
                             prefill_stats: None,
                             routed_experts: None,
                             num_nans_in_logits: 0,
+                            kv_transfer_tensors: None,
                         },
                     ],
                     scheduler_stats: None,

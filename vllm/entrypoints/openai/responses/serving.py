@@ -34,6 +34,8 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     GenerationError,
+    encode_kv_transfer_tensors,
+    validate_inline_kv_transfer,
 )
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
@@ -352,6 +354,13 @@ class OpenAIServingResponses(GenerateBaseServing):
         maybe_validation_error = self._validate_create_responses_input(request)
         if maybe_validation_error is not None:
             return maybe_validation_error
+
+        try:
+            validate_inline_kv_transfer(
+                request.kv_transfer_params, stream=request.stream
+            )
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
@@ -931,7 +940,7 @@ class OpenAIServingResponses(GenerateBaseServing):
             output=output,
             status=status,
             usage=usage,
-            kv_transfer_params=context.kv_transfer_params,
+            kv_transfer_params=encode_kv_transfer_tensors(context.kv_transfer_params),
         )
 
         if request.store:

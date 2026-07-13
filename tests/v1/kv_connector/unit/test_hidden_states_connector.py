@@ -144,13 +144,13 @@ def test_base64_tensor_roundtrip_at_serving_boundary():
     from vllm.distributed.kv_transfer.kv_connector.v1.example_hidden_states_connector import (  # noqa: E501
         decode_base64_tensor,
     )
-    from vllm.entrypoints.openai.completion.serving import (
-        _encode_kv_transfer_tensors,
+    from vllm.entrypoints.generate.base.serving import (
+        encode_kv_transfer_tensors,
     )
 
     hidden_states = torch.randn(5, 4, 8, dtype=torch.bfloat16)
     params = {"hidden_states_inline": True, "hidden_states": hidden_states}
-    encoded = _encode_kv_transfer_tensors(params)
+    encoded = encode_kv_transfer_tensors(params)
 
     assert encoded["hidden_states_inline"] is True
     decoded = decode_base64_tensor(encoded["hidden_states"])

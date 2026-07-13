@@ -190,10 +190,6 @@ class EngineCoreOutput(
     stop_reason: int | str | None = None
     events: list[EngineCoreEvent] | None = None
     kv_transfer_params: dict[str, Any] | None = None
-    # Named tensors from the KV connector, kept in a typed field (instead of
-    # inside kv_transfer_params) so msgpack decoding reconstructs them. The
-    # frontend merges them into RequestOutput.kv_transfer_params.
-    kv_transfer_tensors: dict[str, torch.Tensor] | None = None
 
     trace_headers: Mapping[str, str] | None = None
 
@@ -203,6 +199,13 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    # Named tensors from the KV connector, kept in a typed field (instead of
+    # inside kv_transfer_params) so msgpack decoding reconstructs them. Kept
+    # last so this array_like struct stays positionally wire-compatible with
+    # the Rust engine-core client (which treats it as an opaque trailing
+    # field). The frontend merges them into RequestOutput.kv_transfer_params.
+    kv_transfer_tensors: dict[str, torch.Tensor] | None = None
 
     @property
     def finished(self) -> bool:

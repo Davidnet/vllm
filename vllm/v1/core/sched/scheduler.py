@@ -18,6 +18,9 @@ from vllm.distributed.ec_transfer.ec_connector.base import (
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    merge_finished_sending_payloads,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
@@ -2522,8 +2525,9 @@ class Scheduler(SchedulerInterface):
             self.connector.update_connector_output(kv_connector_output)
 
         if kv_connector_output.finished_sending_payloads:
-            self.pending_kv_payloads.update(
-                kv_connector_output.finished_sending_payloads
+            merge_finished_sending_payloads(
+                self.pending_kv_payloads,
+                kv_connector_output.finished_sending_payloads,
             )
 
         # KV Connector:: update recv and send status from last step.

@@ -128,3 +128,37 @@ def test_payload_buffered_when_sent_before_finished_sending():
     )
 
     assert_scheduler_empty(scheduler)
+
+
+def test_payload_fragments_accumulate_across_steps():
+    """Independently-completing sub-connectors can report different named
+    tensors for the same request in separate steps. Each fragment must be
+    merged into the request's payload, not overwrite the previous one."""
+    scheduler = _make_deferring_scheduler()
+    request = create_request(max_tokens=1)
+    request_id = request.request_id
+    frag_a = torch.randn(3, 2)
+    frag_b = torch.arange(3)
+
+    _finish_request(scheduler, request)
+
+    # STEP 3 & 4: two fragments arrive in separate steps, held meanwhile.
+    _step_with_kv_output(
+        scheduler,
+        KVConnectorOutput(finished_sending_payloads={request_id: {"a": frag_a}}),
+    )
+    _step_with_kv_output(
+        scheduler,
+        KVConnectorOutput(finished_sending_payloads={request_id: {"b": frag_b}}),
+    )
+    assert set(scheduler.pending_kv_payloads[request_id]) == {"a", "b"}
+
+    # STEP 5: finished_sending releases the output with both fragments.
+    engine_core_outputs = _step_with_kv_output(
+        scheduler, KVConnectorOutput(finished_sending={request_id})
+    )
+    (output,) = engine_core_outputs[0].outputs
+    assert torch.equal(output.kv_transfer_tensors["a"], frag_a)
+    assert torch.equal(output.kv_transfer_tensors["b"], frag_b)
+
+    assert_scheduler_empty(scheduler)

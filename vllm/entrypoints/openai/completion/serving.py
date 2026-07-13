@@ -6,11 +6,10 @@ import io
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 import pybase64 as base64
-import torch
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -19,7 +18,9 @@ from vllm.entrypoints.generate.base.serving import (
     GenerationError,
     build_per_request_timing_metrics,
     clamp_prompt_logprobs,
+    encode_kv_transfer_tensors,
     format_token_id_placeholder,
+    validate_inline_kv_transfer,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
@@ -49,32 +50,8 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
-from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
-
-
-def _encode_kv_transfer_tensors(
-    kv_transfer_params: dict[str, Any],
-) -> dict[str, Any]:
-    """Make kv_transfer_params JSON-safe by base64-encoding tensor values.
-
-    Connectors can return tensors inline (e.g. extracted hidden states),
-    which surface here as raw torch.Tensors. Each is replaced with a
-    ``{"dtype", "shape", "data"}`` dict holding its raw bytes base64-encoded
-    (``np.save`` can't represent dtypes like bfloat16). Clients can decode
-    with ``example_hidden_states_connector.decode_base64_tensor``.
-    """
-    return {
-        key: {
-            "dtype": str(value.dtype).removeprefix("torch."),
-            "shape": list(value.shape),
-            "data": base64.b64encode(tensor_data(value)).decode("ascii"),
-        }
-        if isinstance(value, torch.Tensor)
-        else value
-        for key, value in kv_transfer_params.items()
-    }
 
 
 class OpenAIServingCompletion(GenerateBaseServing):
@@ -168,6 +145,15 @@ class OpenAIServingCompletion(GenerateBaseServing):
             return result
 
         engine_inputs = result
+
+        try:
+            validate_inline_kv_transfer(
+                request.kv_transfer_params,
+                stream=request.stream,
+                num_prompts=len(engine_inputs),
+            )
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
@@ -656,9 +642,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
             )
 
         if final_res_batch:
-            kv_transfer_params = final_res_batch[0].kv_transfer_params
-            if kv_transfer_params:
-                kv_transfer_params = _encode_kv_transfer_tensors(kv_transfer_params)
+            kv_transfer_params = encode_kv_transfer_tensors(
+                final_res_batch[0].kv_transfer_params
+            )
         return CompletionResponse(
             id=request_id,
             created=created_time,
