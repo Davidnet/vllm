@@ -3,12 +3,14 @@ use vllm_engine_core_client::EngineCoreClient;
 
 mod error;
 mod inflight;
+mod kv_transfer;
 mod log_stats;
 mod output;
 mod request;
 mod request_metrics;
 
 pub use error::{Error, Result};
+pub use kv_transfer::requests_inline_kv_return;
 pub use output::{
     CollectedGenerateOutput, FinishReason, GenerateOutput, GenerateOutputStream,
     GenerateOutputStreamExt, GeneratePromptInfo, TokenUsage,

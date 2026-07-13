@@ -11,7 +11,7 @@ use vllm_engine_core_client::protocol::logprobs::Logprobs;
 use vllm_engine_core_client::protocol::output::{EngineCoreFinishReason, StopReason};
 use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
@@ -251,6 +251,16 @@ impl Stream for GenerateOutputStream {
         self.request_metrics.observe_output(raw.timestamp, received_at, &raw.output);
 
         let raw = raw.output;
+
+        // The Rust frontend does not decode inline KV connector tensor payloads.
+        // Requests are rejected up front, so encountering them here means the
+        // invariant was violated somewhere upstream; fail loudly rather than
+        // drop the tensors silently.
+        if raw.kv_transfer_tensors.is_some() {
+            return Poll::Ready(Some(Err(Error::InlineKvReturnUnsupported {
+                request_id: raw.request_id,
+            })));
+        }
 
         // Populate the one-time prompt info on the first output.
         if let Some(info) = &mut self.pending_prompt_info

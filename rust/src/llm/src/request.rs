@@ -63,6 +63,23 @@ impl GenerateRequest {
                 request_id: self.request_id,
             });
         }
+        // Reject connector inline return up front. The scheduler defers the
+        // final inline output until the connector reports finished_sending, but
+        // signals the request as finished in the same step, so the engine-core
+        // client tears the stream down before the deferred output (carrying the
+        // tensors) arrives. The output-side backstop never sees it; the caller
+        // would just get a truncated stream. Fail loudly here instead.
+        if crate::requests_inline_kv_return(
+            self.sampling_params
+                .extra_args
+                .as_ref()
+                .and_then(|args| args.get("kv_transfer_params"))
+                .and_then(|kv| kv.get("return_inline")),
+        ) {
+            return Err(Error::InlineKvReturnUnsupported {
+                request_id: self.request_id,
+            });
+        }
         let GenerateRequest {
             request_id,
             prompt_token_ids,
@@ -222,5 +239,37 @@ mod tests {
         let prepared = request.prepare(false).unwrap();
 
         assert_eq!(prepared.engine_request.mm_features, Some(Vec::new()));
+    }
+
+    #[test]
+    fn prepare_rejects_inline_kv_return() {
+        let mut request = sample_request();
+        request.sampling_params.extra_args = Some(
+            [(
+                "kv_transfer_params".to_string(),
+                serde_json::json!({"return_inline": true}),
+            )]
+            .into(),
+        );
+
+        let error = request.prepare(false).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InlineKvReturnUnsupported { request_id } if request_id == "req-1"
+        ));
+    }
+
+    #[test]
+    fn prepare_allows_non_inline_kv_transfer_params() {
+        let mut request = sample_request();
+        request.sampling_params.extra_args = Some(
+            [(
+                "kv_transfer_params".to_string(),
+                serde_json::json!({"do_remote_decode": true}),
+            )]
+            .into(),
+        );
+
+        assert!(request.prepare(false).is_ok());
     }
 }

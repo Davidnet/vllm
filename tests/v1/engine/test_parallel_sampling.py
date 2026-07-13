@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 from vllm import SamplingParams
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind
@@ -66,6 +68,25 @@ def test_parent_request_to_output_final_only() -> None:
     assert ([output_0, output_1], True) == parent_request.get_outputs(
         "child_id_1", output_1
     )
+
+
+def test_parent_request_rejects_inline_kv_return() -> None:
+    # Parallel sampling cannot carry a connector inline-return payload; reject
+    # it before any child request is queued (covers offline / direct-engine
+    # callers that bypass the OpenAI serving validation).
+    params = SamplingParams(
+        n=2, extra_args={"kv_transfer_params": {"return_inline": True}}
+    )
+    with pytest.raises(ValueError, match="n=1"):
+        ParentRequest(make_request(params))
+
+
+def test_parent_request_allows_non_inline_kv_params() -> None:
+    params = SamplingParams(
+        n=2, extra_args={"kv_transfer_params": {"hidden_states_path": "/tmp/x"}}
+    )
+    # Non-inline connector params fan out normally.
+    ParentRequest(make_request(params))
 
 
 def make_request(sampling_params: SamplingParams) -> EngineCoreRequest:

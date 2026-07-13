@@ -354,18 +354,29 @@ def validate_inline_kv_transfer(
     *,
     stream: bool | None = False,
     num_prompts: int = 1,
+    n: int | None = 1,
+    beam_search: bool = False,
+    builtin_tools: bool = False,
 ) -> None:
     """Reject unsupported combinations of connector inline return.
 
     Inline return (``"return_inline": true`` in kv_transfer_params) holds the
     request's final output until the connector reports the payload, then
-    surfaces the tensors on the single response object. That contract is
-    incompatible with streaming (no place to put the deferred payload without
-    silently dropping it) and with batched prompts (a single response has one
-    kv_transfer_params slot). Reject both up front rather than lose data.
+    surfaces the tensors on the single response object. That contract requires
+    exactly one response to carry the payload, so it is incompatible with:
+    streaming (no place to put the deferred payload without silently dropping
+    it), batched prompts (a single response has one kv_transfer_params slot),
+    parallel sampling (``n > 1`` fans out to one connector request per child,
+    and every child but the last has its payload discarded by the output
+    processor), beam search (which spawns internal sampling requests that
+    do not carry kv_transfer_params and discards their connector output), and
+    builtin tool execution (which drives a multi-turn loop where each engine
+    turn overwrites the previous turn's kv_transfer_params, keeping only the
+    last). Reject them up front rather than lose data.
 
     Raises:
-        ValueError: if return_inline is combined with streaming or >1 prompt.
+        ValueError: if return_inline is combined with streaming, >1 prompt,
+            n > 1, beam search, or builtin tools.
     """
     if not kv_transfer_params or not kv_transfer_params.get("return_inline"):
         return
@@ -373,3 +384,9 @@ def validate_inline_kv_transfer(
         raise ValueError("return_inline is not supported with stream=true")
     if num_prompts > 1:
         raise ValueError("return_inline requires a single prompt")
+    if n is not None and n > 1:
+        raise ValueError("return_inline requires n=1")
+    if beam_search:
+        raise ValueError("return_inline is not supported with use_beam_search")
+    if builtin_tools:
+        raise ValueError("return_inline is not supported with builtin tools")

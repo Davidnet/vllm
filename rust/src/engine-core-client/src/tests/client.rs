@@ -2430,6 +2430,8 @@ fn python_msgpack_fixtures_match_rust_encoding() {
     let multipart_prompt_frames =
         lines.next().expect("missing multipart prompt logprobs fixture line");
     let ready_response_hex = lines.next().expect("missing ready response fixture line");
+    let outputs_with_tensors_hex =
+        lines.next().expect("missing inline-tensors outputs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2594,6 +2596,19 @@ fn python_msgpack_fixtures_match_rust_encoding() {
         rust_ready_keys, python_ready_keys,
         "EngineCoreReadyResponse drifted from the Python dataclass",
     );
+
+    // A non-None trailing `kv_transfer_tensors` payload must decode into the
+    // opaque slot while keeping the preceding positional fields aligned.
+    let outputs_with_tensors_bytes = hex::decode(outputs_with_tensors_hex).unwrap();
+    let decoded_with_tensors: EngineCoreOutputs =
+        rmp_serde::from_slice(&outputs_with_tensors_bytes).unwrap();
+    let output = &decoded_with_tensors.as_request_batch().unwrap().outputs[0];
+    assert!(
+        output.kv_transfer_tensors.is_some(),
+        "trailing inline KV tensor payload must decode into the opaque slot",
+    );
+    assert_eq!(output.num_nans_in_logits, 0);
+    assert_eq!(output.finish_reason, Some(EngineCoreFinishReason::Length));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -1,6 +1,7 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::types::{ChatMessage, Tool};
+use crate::utils::reject_inline_kv_return;
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -21,6 +22,11 @@ pub(super) fn validate_request_compat(
     if request.n.unwrap_or(1) > 1 {
         bail_invalid_request!(param = "n", "Only n=1 is supported.");
     }
+
+    reject_inline_kv_return(
+        request.kv_transfer_params.as_ref(),
+        request.vllm_xargs.as_ref(),
+    )?;
 
     if request.top_logprobs.is_some() && !request.logprobs {
         bail_invalid_request!(

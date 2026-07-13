@@ -5,8 +5,9 @@ use axum::http::HeaderMap;
 use serde_json::Value;
 use thiserror_ext::AsReport;
 use uuid::Uuid;
+use vllm_llm::requests_inline_kv_return;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, bail_invalid_request};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResolvedRequestContext {
@@ -43,6 +44,35 @@ pub fn merge_kv_transfer_params(
         );
     }
     xargs
+}
+
+/// Reject connector inline return (`return_inline`) requests: the Rust frontend
+/// forwards `kv_transfer_params` but does not decode the out-of-band inline
+/// tensor frames, so accepting one would silently drop the returned tensors.
+///
+/// `kv_transfer_params` may also be smuggled in nested under `vllm_xargs`. This
+/// mirrors [`merge_kv_transfer_params`]: the top-level field wins when present;
+/// otherwise a value nested in `vllm_xargs` is the effective payload forwarded
+/// to EngineCore. Validate whichever one is effective so the rejection cannot
+/// be bypassed via `vllm_xargs`.
+pub fn reject_inline_kv_return(
+    kv_transfer_params: Option<&HashMap<String, Value>>,
+    vllm_xargs: Option<&HashMap<String, Value>>,
+) -> Result<(), ApiError> {
+    let return_inline = match kv_transfer_params {
+        Some(kv) => kv.get("return_inline"),
+        None => vllm_xargs
+            .and_then(|xargs| xargs.get("kv_transfer_params"))
+            .and_then(|kv| kv.get("return_inline")),
+    };
+    if requests_inline_kv_return(return_inline) {
+        bail_invalid_request!(
+            param = "kv_transfer_params",
+            "Connector inline return (`return_inline`) is not supported by the \
+             Rust frontend; use the Python frontend."
+        );
+    }
+    Ok(())
 }
 
 /// Convert OpenAI-style `logit_bias` with string token-ID keys into the
@@ -103,4 +133,49 @@ pub fn resolve_base_request_id(
         id.truncate(8);
         id
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn kv(params: Value) -> HashMap<String, Value> {
+        match params {
+            Value::Object(map) => map.into_iter().collect(),
+            other => panic!("expected object, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reject_inline_kv_return_rejects_truthy_return_inline() {
+        assert!(reject_inline_kv_return(Some(&kv(json!({"return_inline": true}))), None).is_err());
+    }
+
+    #[test]
+    fn reject_inline_kv_return_rejects_nested_vllm_xargs() {
+        // return_inline smuggled inside vllm_xargs, with no top-level field.
+        let xargs = kv(json!({"kv_transfer_params": {"return_inline": true}}));
+        assert!(reject_inline_kv_return(None, Some(&xargs)).is_err());
+    }
+
+    #[test]
+    fn reject_inline_kv_return_top_level_wins_over_nested() {
+        // Top-level kv_transfer_params overrides the nested one during merge, so
+        // a benign top-level value makes the effective payload benign.
+        let top = kv(json!({}));
+        let xargs = kv(json!({"kv_transfer_params": {"return_inline": true}}));
+        assert!(reject_inline_kv_return(Some(&top), Some(&xargs)).is_ok());
+    }
+
+    #[test]
+    fn reject_inline_kv_return_allows_absent_or_falsy() {
+        assert!(reject_inline_kv_return(None, None).is_ok());
+        assert!(reject_inline_kv_return(Some(&kv(json!({}))), None).is_ok());
+        assert!(reject_inline_kv_return(Some(&kv(json!({"return_inline": false}))), None).is_ok());
+        assert!(reject_inline_kv_return(Some(&kv(json!({"other": "value"}))), None).is_ok());
+        let xargs = kv(json!({"kv_transfer_params": {"return_inline": false}}));
+        assert!(reject_inline_kv_return(None, Some(&xargs)).is_ok());
+    }
 }

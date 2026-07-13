@@ -273,7 +273,10 @@ class OpenAIServingChat(GenerateBaseServing):
 
         try:
             validate_inline_kv_transfer(
-                request.kv_transfer_params, stream=request.stream
+                request.kv_transfer_params,
+                stream=request.stream,
+                n=request.n,
+                beam_search=request.use_beam_search,
             )
         except ValueError as e:
             return self.create_error_response(str(e))

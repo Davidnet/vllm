@@ -144,6 +144,18 @@ hidden_states = decode_base64_tensor(params["hidden_states"])
 token_ids = decode_base64_tensor(params["token_ids"])
 ```
 
+Because the payload must ride on a single response object, inline return is only
+supported for **non-streaming**, **single-prompt**, **`n=1`**, non-beam-search
+requests without **builtin tool execution**. Combining `return_inline` with
+`stream=true`, a batched prompt, `n > 1`, `use_beam_search=true`, or builtin
+tools (which run a multi-turn loop where each turn would overwrite the previous
+turn's payload) is rejected with a 400 error rather than silently dropping
+tensors; the same `n > 1` guard is enforced at the engine level, so offline
+`LLM.generate` raises instead of losing payloads. Inline return is also only
+available on the **Python frontend**; the Rust frontend forwards
+`kv_transfer_params` but does not decode inline tensor payloads, so it rejects
+`return_inline` requests.
+
 ## Configuration
 
 The `kv_connector_extra_config` dict accepts these server-level options:

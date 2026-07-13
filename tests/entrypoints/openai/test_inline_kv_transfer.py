@@ -58,5 +58,24 @@ def test_validate_rejects_inline_with_batched_prompts():
         validate_inline_kv_transfer({"return_inline": True}, num_prompts=2)
 
 
+def test_validate_rejects_inline_with_parallel_sampling():
+    with pytest.raises(ValueError, match="n=1"):
+        validate_inline_kv_transfer({"return_inline": True}, n=2)
+
+
+def test_validate_rejects_inline_with_beam_search():
+    with pytest.raises(ValueError, match="use_beam_search"):
+        validate_inline_kv_transfer({"return_inline": True}, beam_search=True)
+
+
+def test_validate_rejects_inline_with_builtin_tools():
+    with pytest.raises(ValueError, match="builtin tools"):
+        validate_inline_kv_transfer({"return_inline": True}, builtin_tools=True)
+
+
 def test_validate_allows_inline_single_prompt_non_streaming():
-    validate_inline_kv_transfer({"return_inline": True}, stream=False, num_prompts=1)
+    validate_inline_kv_transfer(
+        {"return_inline": True}, stream=False, num_prompts=1, n=1
+    )
+    # n unset (None) is treated as single-choice.
+    validate_inline_kv_transfer({"return_inline": True}, n=None)

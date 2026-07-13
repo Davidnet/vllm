@@ -66,6 +66,12 @@ pub fn to_text_request(
         // convention.
         if let Some(kv_struct) = kv.kv_transfer_params.as_ref() {
             let kv_json = proto_struct_to_json(kv_struct);
+            if vllm_llm::requests_inline_kv_return(kv_json.get("return_inline")) {
+                return Err(Status::invalid_argument(
+                    "Connector inline return (`return_inline`) is not supported by \
+                     the Rust frontend; use the Python frontend.",
+                ));
+            }
             let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
             map.insert("kv_transfer_params".to_string(), kv_json);
         }

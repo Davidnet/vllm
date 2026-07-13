@@ -151,6 +151,8 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 request.kv_transfer_params,
                 stream=request.stream,
                 num_prompts=len(engine_inputs),
+                n=request.n,
+                beam_search=request.use_beam_search,
             )
         except ValueError as e:
             return self.create_error_response(str(e))

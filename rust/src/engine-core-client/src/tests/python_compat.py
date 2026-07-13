@@ -199,6 +199,26 @@ outputs = EngineCoreOutputs(
     finished_requests={"req-1"},
 )
 
+# Inline KV connector tensors occupy the trailing opaque slot. Setting a
+# non-default value here forces msgspec to emit every preceding field, so the
+# Rust client must decode the payload into its opaque `kv_transfer_tensors`
+# slot (without interpreting it) while keeping the earlier fields aligned.
+outputs_with_inline_tensors = EngineCoreOutputs(
+    outputs=[
+        EngineCoreOutput(
+            request_id="req-1",
+            new_token_ids=[7, 8],
+            finish_reason=FinishReason.LENGTH,
+            kv_transfer_tensors={
+                "req-1": {
+                    "hidden_states": ["bfloat16", [2, 2], b"\x00\x01\x02\x03"],
+                }
+            },
+        )
+    ],
+    finished_requests={"req-1"},
+)
+
 
 def encode_ndarray(
     array: np.ndarray,
@@ -397,3 +417,4 @@ print(
     )
 )
 print(msgspec.msgpack.encode(ready_response).hex())
+print(msgspec.msgpack.encode(outputs_with_inline_tensors).hex())

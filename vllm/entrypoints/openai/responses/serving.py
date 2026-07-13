@@ -340,6 +340,32 @@ class OpenAIServingResponses(GenerateBaseServing):
             self._create_responses(request, raw_request), request, raw_request
         )
 
+    def _builtin_tool_list(self, request: ResponsesRequest) -> list[str]:
+        """Builtin tools registered on the server and enabled by the request.
+
+        A nonempty list means ``_generate_with_builtin_tools`` will drive a
+        multi-turn engine loop for this request.
+        """
+        requested_tool_types = extract_tool_types(request.tools)
+        builtin_tool_list: list[str] = []
+        if self.tool_server is not None:
+            if (
+                self.tool_server.has_tool("browser")
+                and "web_search_preview" in requested_tool_types
+            ):
+                builtin_tool_list.append("browser")
+            if (
+                self.tool_server.has_tool("python")
+                and "code_interpreter" in requested_tool_types
+            ):
+                builtin_tool_list.append("python")
+            if (
+                self.tool_server.has_tool("container")
+                and "container" in requested_tool_types
+            ):
+                builtin_tool_list.append("container")
+        return builtin_tool_list
+
     async def _create_responses(
         self, request: ResponsesRequest, raw_request: Request | None = None
     ) -> (
@@ -355,9 +381,17 @@ class OpenAIServingResponses(GenerateBaseServing):
         if maybe_validation_error is not None:
             return maybe_validation_error
 
+        # Only include builtin tools that the request actually asked for.
+        # Without this filter, tools registered on the server (e.g. via
+        # --tool-server demo) would be available for execution even when
+        # the request didn't enable them.
+        builtin_tool_list = self._builtin_tool_list(request)
+
         try:
             validate_inline_kv_transfer(
-                request.kv_transfer_params, stream=request.stream
+                request.kv_transfer_params,
+                stream=request.stream,
+                builtin_tools=bool(builtin_tool_list),
             )
         except ValueError as e:
             return self.create_error_response(str(e))
@@ -404,29 +438,6 @@ class OpenAIServingResponses(GenerateBaseServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[ConversationContext, None]] = []
-
-        # Only include builtin tools that the request actually asked for.
-        # Without this filter, tools registered on the server (e.g. via
-        # --tool-server demo) would be available for execution even when
-        # the request didn't enable them.
-        requested_tool_types = extract_tool_types(request.tools)
-        builtin_tool_list: list[str] = []
-        if self.tool_server is not None:
-            if (
-                self.tool_server.has_tool("browser")
-                and "web_search_preview" in requested_tool_types
-            ):
-                builtin_tool_list.append("browser")
-            if (
-                self.tool_server.has_tool("python")
-                and "code_interpreter" in requested_tool_types
-            ):
-                builtin_tool_list.append("python")
-            if (
-                self.tool_server.has_tool("container")
-                and "container" in requested_tool_types
-            ):
-                builtin_tool_list.append("container")
 
         if self.tool_server is not None:
             available_tools = builtin_tool_list

@@ -36,6 +36,21 @@ class ParentRequest:
     def __init__(self, request: EngineCoreRequest) -> None:
         assert request.external_req_id is not None
         sampling_params = request.params
+        assert isinstance(sampling_params, SamplingParams)
+        # Parallel sampling fans out one connector request per child, and the
+        # output processor keeps only the last-finishing child's
+        # kv_transfer_params. Connector inline return (``return_inline``) needs
+        # a single response to carry the payload, so reject it here — before any
+        # child is queued — rather than silently drop tensors. This is the
+        # engine-level backstop covering offline ``LLM.generate`` and direct
+        # ``AsyncLLM`` callers that bypass the OpenAI serving validation.
+        kv_transfer_params = (
+            sampling_params.extra_args.get("kv_transfer_params")
+            if sampling_params.extra_args
+            else None
+        )
+        if kv_transfer_params and kv_transfer_params.get("return_inline"):
+            raise ValueError("return_inline requires n=1")
         self.request_id = request.request_id
         self.external_req_id = request.external_req_id
         self.sampling_params = sampling_params
