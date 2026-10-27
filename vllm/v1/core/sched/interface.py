@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorBase
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -186,6 +186,13 @@ class SchedulerInterface(ABC):
         """Returns True if there are unfinished requests in the scheduler's
         internal queue."""
         return self.get_num_unfinished_requests() > 0
+
+    def take_flushed_kv_outputs(self) -> list[tuple[int, "EngineCoreOutput"]]:
+        """Take final outputs that finish_requests() released for requests
+        which had finished but were held for a KV connector inline payload,
+        as (client_index, output) pairs. The caller delivers them as final
+        outputs. Schedulers without deferred outputs return an empty list."""
+        return []
 
     @abstractmethod
     def has_finished_requests(self) -> bool:

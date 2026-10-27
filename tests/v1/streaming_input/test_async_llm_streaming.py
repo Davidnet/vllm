@@ -280,3 +280,13 @@ async def test_handle_inputs_stops_after_session_finished(
     sent = [call.args[0] for call in llm._add_request.await_args_list]
     # Both chunks then the final request, or only the first chunk.
     assert sent == ([reqs[1], reqs[2], reqs[0]] if session_live else [reqs[1]])
+
+
+def test_streaming_input_rejects_return_inline():
+    """A connector inline payload rides on the session's final output, which
+    the stream-close path does not hold, so return_inline is refused."""
+    params = SamplingParams(
+        max_tokens=4, extra_args={"kv_transfer_params": {"return_inline": True}}
+    )
+    with pytest.raises(VLLMValidationError, match="return_inline"):
+        AsyncLLM._validate_streaming_input_sampling_params(params)

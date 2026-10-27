@@ -12,6 +12,7 @@ from vllm import LLM, SamplingParams
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
 
 
@@ -92,6 +93,10 @@ def test_extract_hidden_states_with_predictable_dummy_model(
     3. **Per-request options**: custom hidden_states_path and
        include_output_tokens — verifies per-request kv_transfer_params
        plumbing.
+    4. **Inline return**: return_inline alongside a file-based request in
+       the same batch — verifies the tensors arrive in kv_transfer_params
+       with the same values as the file path, that no file is written, and
+       that request shapes which cannot carry the payload are rejected.
     """
     monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
@@ -252,6 +257,77 @@ def test_extract_hidden_states_with_predictable_dummy_model(
             atol=1e-5,
         )
     example_hidden_states_connector.cleanup_hidden_states(custom_path)
+
+    # --- Scenario 4: inline return next to a file-based request -----------
+    inline_prompts = ["Medium length", "Medium length", "Short"]
+    inline_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=0.0,
+        extra_args={
+            "kv_transfer_params": {
+                "return_inline": True,
+                "include_output_tokens": True,
+            }
+        },
+    )
+    file_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=0.0,
+        extra_args={"kv_transfer_params": {"include_output_tokens": True}},
+    )
+    out_inline, out_file, out_inline_short = llm.generate(
+        inline_prompts, [inline_params, file_params, inline_params]
+    )
+
+    for out in (out_inline, out_inline_short):
+        params = out.kv_transfer_params
+        assert params is not None
+        assert params["hidden_states_inline"] is True
+        assert "hidden_states_path" not in params
+        assert not any(key.startswith("_") for key in params)
+        hidden_states = params["hidden_states"]
+        token_ids = params["token_ids"]
+        assert isinstance(hidden_states, torch.Tensor)
+        assert hidden_states.device.type == "cpu"
+        assert out.prompt_token_ids is not None
+        total_tokens = len(out.prompt_token_ids) + len(out.outputs[0].token_ids) - 1
+        assert token_ids.shape[0] == total_tokens
+        assert hidden_states.shape == (total_tokens, num_layers, hidden_size)
+        for idx, layer_id in enumerate(expected_layer_ids):
+            layer_hidden = hidden_states[:, idx, :]
+            assert torch.allclose(
+                layer_hidden, torch.full_like(layer_hidden, layer_id), atol=1e-5
+            )
+    # No file for inline requests; the file request in the same batch is
+    # unaffected and carries the same tensors.
+    assert not os.path.exists(
+        os.path.join(tmp_path, f"{out_inline.request_id}.safetensors")
+    )
+    obj_file = example_hidden_states_connector.load_hidden_states(
+        out_file.kv_transfer_params["hidden_states_path"]
+    )
+    inline_params_out = out_inline.kv_transfer_params
+    assert torch.equal(obj_file["token_ids"], inline_params_out["token_ids"])
+    assert torch.equal(obj_file["hidden_states"], inline_params_out["hidden_states"])
+    example_hidden_states_connector.cleanup_hidden_states(
+        out_file.kv_transfer_params["hidden_states_path"]
+    )
+
+    # Shapes that cannot carry a single inline payload are rejected at the
+    # engine level, so offline callers do not silently lose tensors.
+    for bad_kwargs in (
+        {"n": 2, "temperature": 1.0},
+        {"stop": ["Medium"], "temperature": 0.0},
+    ):
+        with pytest.raises(VLLMValidationError, match="return_inline"):
+            llm.generate(
+                ["Short"],
+                SamplingParams(
+                    max_tokens=max_tokens,
+                    extra_args={"kv_transfer_params": {"return_inline": True}},
+                    **bad_kwargs,
+                ),
+            )
 
 
 @create_new_process_for_each_test()

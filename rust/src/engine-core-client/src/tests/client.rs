@@ -2786,6 +2786,8 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let lora_request_hex = lines.next().expect("missing LoRA request fixture line");
     let inplace_lora_request_hex =
         lines.next().expect("missing in-place LoRA request fixture line");
+    let outputs_with_tensors_hex =
+        lines.next().expect("missing inline-tensors outputs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
@@ -2929,6 +2931,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                                 retryable: true,
                             },
                         ),
+                        kv_transfer_tensors: None,
                     },
                 ],
                 scheduler_stats: None,
@@ -3153,6 +3156,18 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             is_3d_lora_weight: false,
         },
     );
+    // A non-None trailing `kv_transfer_tensors` payload must decode into the
+    // opaque slot while keeping the preceding positional fields aligned.
+    let outputs_with_tensors_bytes = hex::decode(outputs_with_tensors_hex).unwrap();
+    let decoded_with_tensors: EngineCoreOutputs =
+        rmp_serde::from_slice(&outputs_with_tensors_bytes).unwrap();
+    let output = &decoded_with_tensors.as_request_batch().unwrap().outputs[0];
+    assert!(
+        output.kv_transfer_tensors.is_some(),
+        "trailing inline KV tensor payload must decode into the opaque slot",
+    );
+    assert_eq!(output.num_nans_in_logits, 0);
+    assert_eq!(output.finish_reason, Some(EngineCoreFinishReason::Length));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

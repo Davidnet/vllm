@@ -270,6 +270,13 @@ class EngineCoreOutput(
     # Sent with FinishReason.ERROR, e.g. when a paused engine rejects a request.
     error: RequestError | None = None
 
+    # Named tensors from the KV connector, kept in a typed field (instead of
+    # inside kv_transfer_params) so msgpack decoding reconstructs them. Kept
+    # last so this array_like struct stays positionally wire-compatible with
+    # the Rust engine-core client (which treats it as an opaque trailing
+    # field). The frontend merges them into RequestOutput.kv_transfer_params.
+    kv_transfer_tensors: dict[str, torch.Tensor] | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None

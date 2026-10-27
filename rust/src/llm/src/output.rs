@@ -21,7 +21,7 @@ use vllm_engine_core_client::{
 };
 
 use crate::RequestTimestamps;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::inflight::RequestGuard;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
 
@@ -374,6 +374,16 @@ impl GenerateOutputStream {
         let raw = raw.output;
         if let Some(rows) = raw.routed_experts {
             self.routed_experts_chunks.push(*rows);
+        }
+
+        // The Rust frontend does not decode inline KV connector tensor payloads.
+        // Requests are rejected up front, so encountering them here means the
+        // invariant was violated somewhere upstream; fail loudly rather than
+        // drop the tensors silently.
+        if raw.kv_transfer_tensors.is_some() {
+            return Err(Error::InlineKvReturnUnsupported {
+                request_id: raw.request_id,
+            });
         }
 
         // Populate the one-time prompt info on the first output.

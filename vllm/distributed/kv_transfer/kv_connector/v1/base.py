@@ -82,6 +82,14 @@ CopyBlocksOp = Callable[
     None,
 ]
 
+# Reserved kv_transfer_params key. When request_finished() returns it with a
+# True value (and delays block freeing), the scheduler holds the request's
+# final output until the worker reports the request's inline payload in
+# KVConnectorOutput.finished_sending_payloads, or its finished_sending,
+# whichever comes first, then attaches the payload to that output. The
+# scheduler strips this key, so it never reaches the client.
+KV_DEFER_OUTPUT_KEY = "_defer_output_until_sending_done"
+
 logger = init_logger(__name__)
 
 
@@ -422,6 +430,19 @@ class KVConnectorBase_V1(ABC):
             finished_sending=set(finished_sending or ()),
             finished_recving=set(finished_recving or ()),
         )
+
+    def take_finished_sending_payloads(
+        self,
+    ) -> dict[str, dict[str, torch.Tensor]] | None:
+        """Take per-request named CPU tensors to return inline to the client.
+
+        Called after get_transfer_results() each step. A request's whole
+        payload must be reported in a single step, no later than the step in
+        which the request is reported in finished_sending, and requires
+        request_finished() to have set KV_DEFER_OUTPUT_KEY. The scheduler
+        releases the held final output as soon as the payload arrives.
+        """
+        return None
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get the set of block IDs that failed to load.

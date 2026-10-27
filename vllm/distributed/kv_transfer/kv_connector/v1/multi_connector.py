@@ -12,6 +12,9 @@ from vllm.config import VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    merge_finished_sending_payloads,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
@@ -391,6 +394,16 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                     else:
                         self._extra_async_saves[req_id] = extra_pending - 1
         return results
+
+    def take_finished_sending_payloads(
+        self,
+    ) -> dict[str, dict[str, torch.Tensor]] | None:
+        payloads: dict[str, dict[str, torch.Tensor]] = {}
+        for c in self._connectors:
+            connector_payloads = c.take_finished_sending_payloads()
+            if connector_payloads:
+                merge_finished_sending_payloads(payloads, connector_payloads)
+        return payloads or None
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         agg_block_ids: set[int] = set()

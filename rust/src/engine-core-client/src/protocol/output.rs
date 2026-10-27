@@ -149,6 +149,13 @@ pub struct EngineCoreOutput {
     /// when a paused engine rejects a request.
     #[serde(default)]
     pub error: Option<Box<RequestError>>,
+    /// Named CPU tensors returned inline by a KV connector (e.g. extracted
+    /// hidden states). Kept as an opaque trailing field: the Rust frontend
+    /// does not decode the out-of-band tensor frames, so inline payloads are
+    /// not forwarded through this client. Present only to preserve positional
+    /// wire compatibility with the Python `EngineCoreOutput` struct.
+    #[serde(default)]
+    pub kv_transfer_tensors: Option<OpaqueValue>,
 }
 
 /// A request-level error that does not mark the engine as unhealthy.
@@ -595,6 +602,7 @@ mod tests {
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
                             error: None,
+                            kv_transfer_tensors: None,
                         },
                     ],
                     scheduler_stats: None,
