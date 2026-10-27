@@ -2371,6 +2371,20 @@ class EngineCoreProc(EngineCore):
         self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ERROR)
 
     def _send_abort_outputs(self, aborted_reqs: list[Request]) -> None:
+        # Finished requests whose final output was held for an inline KV
+        # payload get that output with its tokens, marked ABORT and without
+        # the payload, instead of a bare abort.
+        flushed = defaultdict[int, list[EngineCoreOutput]](list)
+        for client_index, held_output in self.scheduler.take_flushed_kv_outputs():
+            flushed[client_index].append(held_output)
+        for client_index, held_outputs in flushed.items():
+            eco = EngineCoreOutputs(
+                finished_requests=[o.request_id for o in held_outputs],
+                outputs=held_outputs,
+                weight_version=self._weight_version,
+            )
+            self.output_queue.put_nowait((client_index, eco))
+
         # TODO(nick) this will be moved inside the scheduler
         if aborted_reqs:
             # Map client_index to list of request_ids that belong to that client.

@@ -717,6 +717,13 @@ class AsyncLLM(EngineClient):
                 "for pooling models, n > 1, request_kind = FINAL_ONLY "
                 "or with stop strings."
             )
+        kv_transfer_params = (params.extra_args or {}).get("kv_transfer_params")
+        if kv_transfer_params and kv_transfer_params.get("return_inline"):
+            raise VLLMValidationError(
+                "Input streaming not currently supported with "
+                "kv_transfer_params return_inline: closing the input stream "
+                "does not hold the final output for the connector payload."
+            )
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion

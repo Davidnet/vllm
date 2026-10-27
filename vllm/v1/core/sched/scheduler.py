@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+import torch
+
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.aux_output_connector.connector import AuxOutputSchedulerConnector
@@ -24,7 +26,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KV_DEFER_OUTPUT_KEY,
+    KVConnectorMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -73,7 +78,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus, StreamingUpdate
+from vllm.v1.request import FinishReason, Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -253,6 +258,13 @@ class Scheduler(SchedulerInterface):
         # update_from_output.
         self.grammar_compile_error_reqs: dict[str, RequestError] = {}
         self.encoder_cache_mismatch_reqs: set[str] = set()
+        # KV Connector: final outputs held back (per KV_DEFER_OUTPUT_KEY)
+        # until the worker reports the request's inline payload or its
+        # finished_sending. req_id -> (client_index, held output)
+        self.deferred_kv_outputs: dict[str, tuple[int, EngineCoreOutput]] = {}
+        # Held outputs released by finish_requests(); emitted on the next
+        # update_from_output or by the engine core's abort path.
+        self.flushed_kv_outputs: list[tuple[int, EngineCoreOutput]] = []
 
         # Encoder-related.
         # Calculate encoder cache size if applicable
@@ -2259,6 +2271,10 @@ class Scheduler(SchedulerInterface):
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
+        for client_index, held_output in self.take_flushed_kv_outputs():
+            outputs[client_index].append(held_output)
+            if self.finished_req_ids_dict is not None:
+                self.finished_req_ids_dict[client_index].add(held_output.request_id)
         spec_decoding_stats: SpecDecodingStats | None = None
 
         failed_kv_load_req_ids: set[str] = set()
@@ -2440,6 +2456,7 @@ class Scheduler(SchedulerInterface):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             finish_reason = None
+            defer_output = False
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
@@ -2447,6 +2464,20 @@ class Scheduler(SchedulerInterface):
                 finished = self._handle_stopped_request(request)
                 if finished:
                     kv_transfer_params, ec_transfer_params = self._free_request(request)
+                    if kv_transfer_params:
+                        defer_output = kv_transfer_params.pop(
+                            KV_DEFER_OUTPUT_KEY, False
+                        )
+                        kv_transfer_params = kv_transfer_params or None
+                        if defer_output and req_id not in self.requests:
+                            # Blocks were freed, so no finished_sending will
+                            # ever release the output; emit it now.
+                            logger.warning_once(
+                                "Connector set %s without delaying block "
+                                "freeing; the output is not deferred.",
+                                KV_DEFER_OUTPUT_KEY,
+                            )
+                            defer_output = False
                     if (
                         prefill_stats is not None
                         and kv_transfer_params is not None
@@ -2481,31 +2512,38 @@ class Scheduler(SchedulerInterface):
             prompt_token_id_logprobs = prompt_token_id_logprobs_dict.get(req_id)
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.
-                outputs[request.client_index].append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=new_token_ids,
-                        finish_reason=finish_reason,
-                        new_logprobs=new_logprobs,
-                        new_sampling_mask=new_sampling_mask,
-                        new_prompt_logprobs_tensors=prompt_logprobs_tensors,
-                        prompt_token_id_logprobs=prompt_token_id_logprobs,
-                        pooling_output=pooler_output,
-                        stop_reason=request.stop_reason,
-                        events=request.take_events(),
-                        prefill_stats=prefill_stats,
-                        spec_decode_metrics=(
-                            request.spec_decode_metrics
-                            if finish_reason is not None
-                            else None
-                        ),
-                        kv_transfer_params=kv_transfer_params,
-                        ec_transfer_params=ec_transfer_params,
-                        trace_headers=request.trace_headers,
-                        routed_experts=routed_experts,
-                        num_nans_in_logits=request.num_nans_in_logits,
-                    )
+                output = EngineCoreOutput(
+                    request_id=req_id,
+                    new_token_ids=new_token_ids,
+                    finish_reason=finish_reason,
+                    new_logprobs=new_logprobs,
+                    new_sampling_mask=new_sampling_mask,
+                    new_prompt_logprobs_tensors=prompt_logprobs_tensors,
+                    prompt_token_id_logprobs=prompt_token_id_logprobs,
+                    pooling_output=pooler_output,
+                    stop_reason=request.stop_reason,
+                    events=request.take_events(),
+                    prefill_stats=prefill_stats,
+                    spec_decode_metrics=(
+                        request.spec_decode_metrics
+                        if finish_reason is not None
+                        else None
+                    ),
+                    kv_transfer_params=kv_transfer_params,
+                    ec_transfer_params=ec_transfer_params,
+                    trace_headers=request.trace_headers,
+                    routed_experts=routed_experts,
+                    num_nans_in_logits=request.num_nans_in_logits,
                 )
+                if defer_output:
+                    # Hold the final output until the KV connector reports
+                    # the inline payload (_update_from_kv_xfer_finished).
+                    # Its finished id is reported together with the output.
+                    self.deferred_kv_outputs[req_id] = (request.client_index, output)
+                    if self.finished_req_ids_dict is not None:
+                        self.finished_req_ids_dict[request.client_index].discard(req_id)
+                else:
+                    outputs[request.client_index].append(output)
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors
@@ -2552,7 +2590,7 @@ class Scheduler(SchedulerInterface):
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
-            self._update_from_kv_xfer_finished(kv_connector_output)
+            self._update_from_kv_xfer_finished(kv_connector_output, outputs)
 
         # EC Connector: update state from worker-side EC connector output.
         if self.ec_connector is not None and ec_connector_output:
@@ -2965,6 +3003,18 @@ class Scheduler(SchedulerInterface):
         for req_id in request_ids:
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
+                # A finished request whose final output is still held for an
+                # inline payload: release the output with its tokens but
+                # without the payload, marked aborted so the client can tell
+                # the payload was dropped. The connector's params announced
+                # that payload, so they go too.
+                deferred = self.deferred_kv_outputs.pop(req_id, None)
+                if deferred is not None:
+                    client_index, held_output = deferred
+                    held_output.finish_reason = FinishReason.ABORT
+                    held_output.stop_reason = None
+                    held_output.kv_transfer_params = None
+                    self.flushed_kv_outputs.append((client_index, held_output))
                 # Invalid request ID.
                 continue
 
@@ -3498,17 +3548,29 @@ class Scheduler(SchedulerInterface):
 
         return True
 
-    def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
+    def _update_from_kv_xfer_finished(
+        self,
+        kv_connector_output: KVConnectorOutput,
+        outputs: dict[int, list[EngineCoreOutput]],
+    ):
         """KV Connector: update the scheduler state based on the output.
 
         The Worker side connectors add finished_recving and
         finished_sending reqs to the output.
-        * if finished_sending: free the blocks
+        * if finished_sending_payloads: emit the held final output with the
+            inline payload attached
+        * if finished_sending: emit any still-held final output and free
+            the blocks
         # if finished_recving: add to state so we can
             schedule the request during the next step.
         """
         if self.connector is not None:
             self.connector.update_connector_output(kv_connector_output)
+
+        for req_id, payload in (
+            kv_connector_output.finished_sending_payloads or {}
+        ).items():
+            self._release_deferred_output(req_id, outputs, payload)
 
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
@@ -3524,7 +3586,37 @@ class Scheduler(SchedulerInterface):
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
             assert req_id in self.requests
+            # A connector that finishes without reporting a payload still
+            # releases the held output rather than leave the client waiting.
+            self._release_deferred_output(req_id, outputs)
             self._free_blocks(self.requests[req_id])
+
+    def _release_deferred_output(
+        self,
+        req_id: str,
+        outputs: dict[int, list[EngineCoreOutput]],
+        payload: dict[str, torch.Tensor] | None = None,
+    ) -> None:
+        """Emit a held final output, with the inline payload if given."""
+        deferred = self.deferred_kv_outputs.pop(req_id, None)
+        if deferred is None:
+            # Not held (e.g. aborted, or output already released).
+            return
+        client_index, held_output = deferred
+        if payload is not None:
+            held_output.kv_transfer_tensors = payload
+        outputs[client_index].append(held_output)
+        if self.finished_req_ids_dict is not None:
+            self.finished_req_ids_dict[client_index].add(req_id)
+
+    def take_flushed_kv_outputs(self) -> list[tuple[int, EngineCoreOutput]]:
+        """Take held outputs released by finish_requests(), as
+        (client_index, output) pairs. The caller delivers them as final
+        outputs and reports their ids as finished."""
+        if not self.flushed_kv_outputs:
+            return []
+        flushed, self.flushed_kv_outputs = self.flushed_kv_outputs, []
+        return flushed
 
     def _update_requests_with_invalid_blocks(
         self,

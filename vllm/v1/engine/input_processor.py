@@ -135,6 +135,23 @@ class InputProcessor:
         )
         params.watermarking = watermarking
 
+    @staticmethod
+    def _validate_inline_kv_return(params: SamplingParams) -> None:
+        """A connector inline payload rides on one final engine output, so
+        parallel sampling (one connector request per child) and stop strings
+        (matched in the frontend, which then aborts the engine request before
+        the held output is released) cannot carry it."""
+        kv_transfer_params = (params.extra_args or {}).get("kv_transfer_params")
+        if not kv_transfer_params or not kv_transfer_params.get("return_inline"):
+            return
+        if params.n > 1:
+            raise VLLMValidationError("return_inline requires n=1", parameter="n")
+        if params.stop:
+            raise VLLMValidationError(
+                "return_inline is not supported with stop strings; use stop_token_ids",
+                parameter="stop",
+            )
+
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
@@ -160,6 +177,7 @@ class InputProcessor:
                 self.structured_outputs_config,
                 self.tokenizer,
             )
+            self._validate_inline_kv_return(params)
             if params.prompt_logprob_token_ids is not None:
                 if not self.vllm_config.use_v2_model_runner:
                     raise VLLMValidationError(

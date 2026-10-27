@@ -84,6 +84,14 @@ def test_parallel_sampling_child_requests_preserve_session_id() -> None:
         assert child_request.session_id == "session-1"
 
 
+def test_parent_request_allows_non_inline_kv_params() -> None:
+    params = SamplingParams(
+        n=2, extra_args={"kv_transfer_params": {"hidden_states_path": "/tmp/x"}}
+    )
+    # Non-inline connector params fan out normally.
+    ParentRequest(make_request(params))
+
+
 def make_request(sampling_params: SamplingParams) -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id="parent_id",

@@ -782,6 +782,11 @@ class OutputProcessor:
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
             ec_transfer_params = engine_core_output.ec_transfer_params
+            if engine_core_output.kv_transfer_tensors:
+                # Surface connector tensors to the client alongside the
+                # other kv transfer params, as real torch.Tensors.
+                kv_transfer_params = dict(kv_transfer_params or {})
+                kv_transfer_params.update(engine_core_output.kv_transfer_tensors)
             if engine_core_output.routed_experts is not None:
                 req_state.routed_experts_chunks.append(
                     engine_core_output.routed_experts
