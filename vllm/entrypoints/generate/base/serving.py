@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import json
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar
 
+import pybase64 as base64
+import torch
 from fastapi import Request
 from pydantic import ConfigDict
 
@@ -33,6 +36,7 @@ from vllm.lora.request import LoRARequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.utils import tensor_data
 
 logger = init_logger(__name__)
 
@@ -391,3 +395,80 @@ def clamp_prompt_logprobs(
             if logprob_values.logprob == float("-inf"):
                 logprob_values.logprob = -9999.0
     return prompt_logprobs
+
+
+def encode_kv_transfer_tensors(
+    kv_transfer_params: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Make kv_transfer_params JSON-safe by base64-encoding tensor values.
+
+    Connectors can return tensors inline (e.g. extracted hidden states),
+    which surface in RequestOutput.kv_transfer_params as raw torch.Tensors.
+    Each is replaced with a ``{"dtype", "shape", "data"}`` dict holding its raw
+    bytes base64-encoded (``np.save`` can't represent dtypes like bfloat16).
+    Clients decode with ``example_hidden_states_connector.decode_base64_tensor``.
+
+    Shared across the completions, chat, and responses serving boundaries so
+    every endpoint that accepts kv_transfer_params encodes tensors uniformly
+    instead of leaking raw torch.Tensors into JSON serialization.
+    """
+    if not kv_transfer_params:
+        return kv_transfer_params
+    return {
+        key: {
+            "dtype": str(value.dtype).removeprefix("torch."),
+            "shape": list(value.shape),
+            "data": base64.b64encode_as_string(tensor_data(value)),
+        }
+        if isinstance(value, torch.Tensor)
+        else value
+        for key, value in kv_transfer_params.items()
+    }
+
+
+async def encode_kv_transfer_tensors_async(
+    kv_transfer_params: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Run encode_kv_transfer_tensors off the event loop when tensors are present.
+
+    The host copy and base64 encoding release the GIL, so a worker thread keeps
+    the API server responsive during a large payload. Params without tensors
+    are returned as-is without a thread hop.
+    """
+    if not kv_transfer_params or not any(
+        isinstance(value, torch.Tensor) for value in kv_transfer_params.values()
+    ):
+        return kv_transfer_params
+    return await asyncio.to_thread(encode_kv_transfer_tensors, kv_transfer_params)
+
+
+def validate_inline_kv_transfer(
+    kv_transfer_params: dict[str, Any] | None,
+    *,
+    stream: bool | None = False,
+    num_prompts: int = 1,
+    beam_search: bool = False,
+    builtin_tools: bool = False,
+) -> None:
+    """Reject HTTP request shapes that cannot carry a connector inline payload.
+
+    The payload rides on exactly one non-streaming response, so streaming,
+    batched prompts, beam search and the builtin-tool loop (each of which
+    fans out or overwrites ``kv_transfer_params``) are rejected rather than
+    silently dropping tensors. ``n > 1`` and stop strings are rejected by the
+    engine's request validation for every frontend.
+
+    Raises:
+        ValueError: if ``return_inline`` is combined with any of the above.
+
+    """
+    if not kv_transfer_params or not kv_transfer_params.get("return_inline"):
+        return
+    if stream:
+        raise ValueError("return_inline is not supported with stream=true")
+    if num_prompts > 1:
+        raise ValueError("return_inline requires a single prompt")
+    if beam_search:
+        raise ValueError("return_inline is not supported with use_beam_search")
+    if builtin_tools:
+        raise ValueError("return_inline is not supported with builtin tools")

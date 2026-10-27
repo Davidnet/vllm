@@ -23,7 +23,9 @@ from vllm.entrypoints.generate.base.serving import (
     build_spec_decoding_metrics,
     chat_top_logprobs_limit,
     clamp_prompt_logprobs,
+    encode_kv_transfer_tensors_async,
     format_token_id_placeholder,
+    validate_inline_kv_transfer,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -268,6 +270,15 @@ class ServingTokens(GenerateBaseServing):
             )
         except (OverflowError, TypeError, ValueError) as e:
             return self.create_error_response(e)
+        # The top-level field wins; otherwise sampling_params.extra_args may
+        # carry kv_transfer_params directly.
+        kv_transfer_params = request.kv_transfer_params
+        if kv_transfer_params is None and sampling_params.extra_args:
+            kv_transfer_params = sampling_params.extra_args.get("kv_transfer_params")
+        try:
+            validate_inline_kv_transfer(kv_transfer_params, stream=request.stream)
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         engine_input: EngineInput
         if request.content_parts:
@@ -552,6 +563,9 @@ class ServingTokens(GenerateBaseServing):
             created_time,
             num_generated_tokens,
             request_metadata,
+        )
+        response_fields["kv_transfer_params"] = await encode_kv_transfer_tensors_async(
+            response_fields["kv_transfer_params"]
         )
         response: (
             GenerateTokensResponse | GenerateTextResponse | GenerateDerenderResponse

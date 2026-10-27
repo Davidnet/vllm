@@ -1240,6 +1240,15 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 "prompt cannot serve several conversations.",
                 parameter="kv_transfer_params.prompt_token_ids",
             )
+        if isinstance(kv_transfer_params, dict) and kv_transfer_params.get(
+            "return_inline"
+        ):
+            raise VLLMValidationError(
+                "Batch chat completions do not support "
+                "`kv_transfer_params['return_inline']`: the batched response "
+                "carries no connector payload.",
+                parameter="kv_transfer_params.return_inline",
+            )
         response_format = data.get("response_format")
         if response_format is not None:
             rf_type = (

@@ -21,7 +21,9 @@ from vllm.entrypoints.generate.base.serving import (
     build_spec_decoding_metrics,
     clamp_prompt_logprobs,
     completion_top_logprobs_limit,
+    encode_kv_transfer_tensors_async,
     format_token_id_placeholder,
+    validate_inline_kv_transfer,
 )
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
@@ -143,6 +145,16 @@ class OpenAIServingCompletion(GenerateBaseServing):
             return result
 
         engine_inputs = result
+
+        try:
+            validate_inline_kv_transfer(
+                request.kv_transfer_params,
+                stream=request.stream,
+                num_prompts=len(engine_inputs),
+                beam_search=request.use_beam_search,
+            )
+        except ValueError as e:
+            return self.create_error_response(str(e))
 
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
@@ -266,6 +278,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 model_name,
                 tokenizer,
                 request_metadata,
+            )
+            response.kv_transfer_params = await encode_kv_transfer_tensors_async(
+                response.kv_transfer_params
             )
 
             if self.enable_log_outputs and self.request_logger:
