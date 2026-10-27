@@ -138,6 +138,7 @@ class EngineCoreOutput(
     spec_decode_metrics: object | None = None
     prompt_token_id_logprobs: object | None = None
     error: RequestError | None = None
+    kv_transfer_tensors: object | None = None
 
 
 class ExtendedEngineCoreOutput(EngineCoreOutput):
@@ -328,6 +329,30 @@ outputs_with_sampling_mask = EngineCoreOutputs(
             new_sampling_mask=sampling_mask_wire,
         )
     ]
+)
+
+# Inline KV connector tensors occupy the trailing opaque slot. Setting a
+# non-default value here forces msgspec to emit every preceding field, so the
+# Rust client must decode the payload into its opaque `kv_transfer_tensors`
+# slot (without interpreting it) while keeping the earlier fields aligned.
+outputs_with_inline_tensors = EngineCoreOutputs(
+    outputs=[
+        EngineCoreOutput(
+            request_id="req-1",
+            new_token_ids=[7, 8],
+            finish_reason=FinishReason.LENGTH,
+            # Shape of MsgpackEncoder._encode_tensor for a small CPU tensor:
+            # (dtype, shape, Ext(CUSTOM_TYPE_RAW_VIEW, raw bytes)).
+            kv_transfer_tensors={
+                "hidden_states": (
+                    "bfloat16",
+                    [2, 2],
+                    msgspec.msgpack.Ext(3, b"\x00\x01\x02\x03\x04\x05\x06\x07"),
+                ),
+            },
+        )
+    ],
+    finished_requests={"req-1"},
 )
 
 
@@ -631,3 +656,4 @@ print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())
 print(msgspec.msgpack.encode(lora_request).hex())
 print(msgspec.msgpack.encode(inplace_lora_request).hex())
+print(msgspec.msgpack.encode(outputs_with_inline_tensors).hex())

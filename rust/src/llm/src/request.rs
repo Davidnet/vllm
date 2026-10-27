@@ -77,6 +77,19 @@ impl GenerateRequest {
                 request_id: self.request_id,
             });
         }
+        // The engine-core client tears the stream down on `finished_requests`
+        // before a deferred inline output arrives, so reject it up front.
+        if crate::requests_inline_kv_return(
+            self.sampling_params
+                .extra_args
+                .as_ref()
+                .and_then(|args| args.get("kv_transfer_params"))
+                .and_then(|kv| kv.get("return_inline")),
+        ) {
+            return Err(Error::InlineKvReturnUnsupported {
+                request_id: self.request_id,
+            });
+        }
         let GenerateRequest {
             request_id,
             prompt_token_ids,
@@ -323,5 +336,37 @@ mod tests {
             let actual = request.prepare(false).unwrap().remote_prefill_cached_tokens();
             assert_eq!(actual, expected, "{name}");
         }
+    }
+
+    #[test]
+    fn prepare_rejects_inline_kv_return() {
+        let mut request = sample_request();
+        request.sampling_params.extra_args = Some(
+            [(
+                "kv_transfer_params".to_string(),
+                serde_json::json!({"return_inline": true}),
+            )]
+            .into(),
+        );
+
+        let error = request.prepare(false).unwrap_err();
+        assert!(matches!(
+            error,
+            Error::InlineKvReturnUnsupported { request_id } if request_id == "req-1"
+        ));
+    }
+
+    #[test]
+    fn prepare_allows_non_inline_kv_transfer_params() {
+        let mut request = sample_request();
+        request.sampling_params.extra_args = Some(
+            [(
+                "kv_transfer_params".to_string(),
+                serde_json::json!({"do_remote_decode": true}),
+            )]
+            .into(),
+        );
+
+        assert!(request.prepare(false).is_ok());
     }
 }

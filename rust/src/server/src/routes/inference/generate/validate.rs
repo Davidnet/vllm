@@ -3,6 +3,7 @@
 
 use super::types::{GenerateOutputMode, GenerateRequest};
 use crate::error::{ApiError, bail_invalid_request};
+use crate::utils::reject_inline_kv_return;
 
 /// Enforce the minimal compatibility contract for the Rust token generate
 /// route.
@@ -57,6 +58,11 @@ pub(crate) fn validate_request_compat(
             "token_ids must contain at least one token ID."
         );
     }
+
+    reject_inline_kv_return(
+        request.kv_transfer_params.as_ref(),
+        request.sampling_params.inner.vllm_xargs.as_ref(),
+    )?;
 
     if request.sampling_params.inner.max_tokens == Some(0) {
         bail_invalid_request!(
