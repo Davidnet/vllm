@@ -184,6 +184,8 @@ def _bare_connector() -> ExampleHiddenStatesConnector:
     conn._connector_metadata = None
     conn._req_copy_events = {}
     conn._accumulated_finished_req_ids = set()
+    conn._inline_payloads = {}
+    conn._ready_payloads = {}
     return conn
 
 
@@ -228,3 +230,33 @@ def test_get_finished_reports_tracked_completed_request():
     done_sending, done_recving = conn.get_finished({"cmpl-done"})
     assert done_sending == {"cmpl-done"}
     assert done_recving is None
+
+
+# ---- inline return ----------------------------------------------------------
+
+
+def test_get_finished_hands_inline_payload_to_take():
+    # Inline tensors become visible to take_finished_sending_payloads only once
+    # the DtoH copy event is complete, in the same call that reports the
+    # request as done_sending.
+    conn = _bare_connector()
+    payload = {"hidden_states": torch.zeros(2, 3), "token_ids": torch.arange(2)}
+
+    class _Event:
+        done = False
+
+        def query(self) -> bool:
+            return self.done
+
+    event = _Event()
+    conn._req_copy_events["req-1"] = event
+    conn._inline_payloads["req-1"] = payload
+
+    assert conn.get_finished({"req-1"}) == (None, None)
+    assert conn.take_finished_sending_payloads() is None
+
+    event.done = True
+    assert conn.get_finished(set()) == ({"req-1"}, None)
+    assert conn.take_finished_sending_payloads() == {"req-1": payload}
+    # Drained: a second call reports nothing.
+    assert conn.take_finished_sending_payloads() is None

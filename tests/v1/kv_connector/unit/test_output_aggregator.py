@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import torch
 
 from vllm.distributed.kv_events import (
     BlockStored,
@@ -73,6 +74,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         expected_finished_count: int = 0,
         kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
         kv_cache_events: KVConnectorKVEvents | None = None,
+        finished_sending_payloads: dict[str, dict[str, torch.Tensor]] | None = None,
     ):
         self.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending,
@@ -82,6 +84,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
             expected_finished_count=expected_finished_count,
             kv_connector_worker_meta=kv_connector_worker_meta,
             kv_cache_events=kv_cache_events,
+            finished_sending_payloads=finished_sending_payloads,
         )
 
     def __repr__(self):
@@ -348,3 +351,29 @@ def test_salvaged_event_votes_are_one_shot():
     events = aggregated.kv_connector_output.kv_cache_events
     assert events is not None
     assert [e.token_ids for e in lmcache_published(events)] == [[5, 6, 7, 8]]
+
+
+def test_aggregate_finished_sending_payloads_merges_across_workers():
+    """TP ranks can each report a different named tensor for the same
+    request. Aggregation must merge the inner dicts, not let a later worker's
+    payload overwrite an earlier one."""
+    aggregator = KVOutputAggregator(expected_finished_count=2)
+
+    frag_a = torch.randn(3, 2)
+    frag_b = torch.arange(3)
+    output1 = DummyModelRunnerOutput(
+        finished_sending={"req1"},
+        finished_sending_payloads={"req1": {"a": frag_a}},
+    )
+    output2 = DummyModelRunnerOutput(
+        finished_sending={"req1"},
+        finished_sending_payloads={"req1": {"b": frag_b}},
+    )
+
+    aggregated = aggregator.aggregate([output1, output2]).kv_connector_output
+
+    assert aggregated.finished_sending == {"req1"}
+    payloads = aggregated.finished_sending_payloads
+    assert set(payloads["req1"]) == {"a", "b"}
+    assert torch.equal(payloads["req1"]["a"], frag_a)
+    assert torch.equal(payloads["req1"]["b"], frag_b)
